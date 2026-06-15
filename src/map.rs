@@ -231,7 +231,7 @@ fn render_symbol_section(symbols: &[IndexedSymbol]) {
     }
 }
 
-fn ordered_edges<'a>(edges: &'a [&'a IndexedEdge]) -> Vec<&'a IndexedEdge> {
+pub(crate) fn ordered_edges<'a>(edges: &'a [&'a IndexedEdge]) -> Vec<&'a IndexedEdge> {
     let mut ordered = edges.to_vec();
     ordered.sort_by(|left, right| {
         edge_type_rank(&left.edge_type)
@@ -311,7 +311,11 @@ fn edge_type_rank(edge_type: &str) -> usize {
         .unwrap_or(EDGE_TYPE_PRIORITY.len())
 }
 
-fn build_next_actions(repo: &RepoInfo, file: &IndexedFile, index_status: &str) -> Vec<String> {
+pub(crate) fn build_next_actions(
+    repo: &RepoInfo,
+    file: &IndexedFile,
+    index_status: &str,
+) -> Vec<String> {
     let mut actions = Vec::new();
     actions.push(format!("open {}", file.path));
 

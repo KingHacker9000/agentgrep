@@ -5,6 +5,7 @@ mod output;
 mod rank;
 mod repo;
 mod search;
+mod symbol;
 mod text;
 mod types;
 
@@ -61,6 +62,11 @@ fn run() -> Result<()> {
             let repo = repo::discover()?;
             let report = map::build_report(&repo, &path)?;
             map::write_report(&report, json)?;
+        }
+        cli::Commands::Symbol { name, json } => {
+            let repo = repo::discover()?;
+            let report = symbol::build_report(&repo, &name)?;
+            symbol::write_report(&report, json)?;
         }
     }
 

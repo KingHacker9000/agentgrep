@@ -34,4 +34,12 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Locate a symbol in the indexed source files.
+    Symbol {
+        /// Symbol name to search for.
+        name: String,
+        /// Emit stable JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
 }

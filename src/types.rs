@@ -118,6 +118,24 @@ pub struct MapReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct SymbolReport {
+    pub query: String,
+    pub index_status: String,
+    pub match_mode: SymbolMatchMode,
+    pub matches: Vec<SymbolMatch>,
+    pub next_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SymbolMatch {
+    pub symbol: IndexedSymbol,
+    pub file_role: String,
+    pub outgoing_edges: Vec<MapEdge>,
+    pub incoming_edges: Vec<MapEdge>,
+    pub next_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct MapEdge {
     pub edge_type: String,
     pub from: String,
@@ -132,6 +150,27 @@ pub struct ConnectionCounts {
     pub incoming_total: usize,
     pub outgoing_by_type: BTreeMap<String, usize>,
     pub incoming_by_type: BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SymbolMatchMode {
+    Exact,
+    CaseInsensitive,
+    Substring,
+    None,
+}
+
+impl std::fmt::Display for SymbolMatchMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            SymbolMatchMode::Exact => "exact",
+            SymbolMatchMode::CaseInsensitive => "case_insensitive",
+            SymbolMatchMode::Substring => "substring",
+            SymbolMatchMode::None => "none",
+        };
+        write!(f, "{value}")
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
