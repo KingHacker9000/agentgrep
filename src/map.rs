@@ -7,6 +7,14 @@ use crate::repo::{display_path, RepoInfo};
 use crate::types::{ConnectionCounts, MapEdge, MapReport};
 
 const MAP_EDGE_DISPLAY_LIMIT: usize = 5;
+const EDGE_TYPE_PRIORITY: [&str; 6] = [
+    "declares_module",
+    "imports",
+    "references",
+    "likely_test_for",
+    "configures",
+    "same_area",
+];
 
 pub fn build_report(repo: &RepoInfo, input_path: &str) -> Result<MapReport> {
     let loaded = index::load(repo)?;
@@ -38,6 +46,9 @@ pub fn build_report(repo: &RepoInfo, input_path: &str) -> Result<MapReport> {
         .filter(|edge| edge.to == resolved_path)
         .collect();
 
+    let outgoing_display = ordered_edges(&outgoing_all);
+    let incoming_display = ordered_edges(&incoming_all);
+
     let connection_counts = ConnectionCounts {
         outgoing_total: outgoing_all.len(),
         incoming_total: incoming_all.len(),
@@ -54,8 +65,8 @@ pub fn build_report(repo: &RepoInfo, input_path: &str) -> Result<MapReport> {
         size_bytes: file.size_bytes,
         modified_unix: file.modified_unix,
         content_hash: file.content_hash.clone(),
-        outgoing_edges: render_edges(&outgoing_all),
-        incoming_edges: render_edges(&incoming_all),
+        outgoing_edges: render_edges(&outgoing_display),
+        incoming_edges: render_edges(&incoming_display),
         connection_counts,
         next_actions: build_next_actions(repo, file, &loaded.state.to_string()),
     })
@@ -172,13 +183,26 @@ fn render_edge_section(edges: &[MapEdge], counts: &BTreeMap<String, usize>) {
     if !counts.is_empty() {
         println!(
             "  counts: {}",
-            counts
-                .iter()
+            ordered_count_items(counts)
+                .into_iter()
                 .map(|(edge_type, count)| format!("{edge_type}:{count}"))
                 .collect::<Vec<_>>()
                 .join(", ")
         );
     }
+}
+
+fn ordered_edges<'a>(edges: &'a [&'a IndexedEdge]) -> Vec<&'a IndexedEdge> {
+    let mut ordered = edges.to_vec();
+    ordered.sort_by(|left, right| {
+        edge_type_rank(&left.edge_type)
+            .cmp(&edge_type_rank(&right.edge_type))
+            .then_with(|| left.edge_type.cmp(&right.edge_type))
+            .then_with(|| left.from.cmp(&right.from))
+            .then_with(|| left.to.cmp(&right.to))
+            .then_with(|| left.reason.cmp(&right.reason))
+    });
+    ordered
 }
 
 fn count_edges_by_type(edges: &[&IndexedEdge]) -> BTreeMap<String, usize> {
@@ -187,6 +211,16 @@ fn count_edges_by_type(edges: &[&IndexedEdge]) -> BTreeMap<String, usize> {
         *counts.entry(edge.edge_type.clone()).or_insert(0) += 1;
     }
     counts
+}
+
+fn ordered_count_items(counts: &BTreeMap<String, usize>) -> Vec<(&String, &usize)> {
+    let mut items = counts.iter().collect::<Vec<_>>();
+    items.sort_by(|left, right| {
+        edge_type_rank(left.0)
+            .cmp(&edge_type_rank(right.0))
+            .then_with(|| left.0.cmp(right.0))
+    });
+    items
 }
 
 fn render_edges(edges: &[&IndexedEdge]) -> Vec<MapEdge> {
@@ -201,6 +235,13 @@ fn render_edges(edges: &[&IndexedEdge]) -> Vec<MapEdge> {
             reason: edge.reason.clone(),
         })
         .collect()
+}
+
+fn edge_type_rank(edge_type: &str) -> usize {
+    EDGE_TYPE_PRIORITY
+        .iter()
+        .position(|candidate| candidate == &edge_type)
+        .unwrap_or(EDGE_TYPE_PRIORITY.len())
 }
 
 fn build_next_actions(repo: &RepoInfo, file: &IndexedFile, index_status: &str) -> Vec<String> {
@@ -323,6 +364,59 @@ mod tests {
             .any(|action| action == "agentgrep index"));
     }
 
+    #[test]
+    fn prioritizes_import_edges_in_map_output() {
+        let repo = RepoInfo {
+            root: PathBuf::from("C:/repo"),
+            rev: Some("abc".to_string()),
+            git_dir: None,
+        };
+        let loaded = index::LoadedIndex {
+            index_path: PathBuf::from("C:/repo/.agentgrep/index.json"),
+            state: IndexState::Fresh,
+            index: Some(RepoIndex {
+                schema_version: 1,
+                repo_root: "C:/repo".to_string(),
+                repo_rev: Some("abc".to_string()),
+                indexed_at_unix: 1,
+                files: vec![IndexedFile {
+                    path: "src/search.rs".to_string(),
+                    role: FileRole::Source,
+                    size_bytes: Some(10),
+                    modified_unix: Some(20),
+                    content_hash: Some("deadbeef".to_string()),
+                }],
+                edges: vec![
+                    crate::index::IndexedEdge {
+                        edge_type: "same_area".to_string(),
+                        from: "src/search.rs".to_string(),
+                        to: "src/types.rs".to_string(),
+                        confidence: EdgeConfidence::Extracted,
+                        reason: "shared source area src".to_string(),
+                    },
+                    crate::index::IndexedEdge {
+                        edge_type: "imports".to_string(),
+                        from: "src/search.rs".to_string(),
+                        to: "src/text.rs".to_string(),
+                        confidence: EdgeConfidence::Extracted,
+                        reason: "imports crate::text".to_string(),
+                    },
+                ],
+                stats: IndexStats {
+                    file_count: 1,
+                    role_counts: BTreeMap::from([(FileRole::Source, 1)]),
+                    connection_count: 2,
+                },
+            }),
+        };
+        let report = build_report_from_loaded(&repo, &loaded, "src/search.rs").unwrap();
+        assert_eq!(report.outgoing_edges.first().unwrap().edge_type, "imports");
+        assert_eq!(
+            report.connection_counts.outgoing_by_type.get("imports"),
+            Some(&1)
+        );
+    }
+
     fn build_report_from_loaded(
         repo: &RepoInfo,
         loaded: &index::LoadedIndex,
@@ -354,8 +448,8 @@ mod tests {
             size_bytes: file.size_bytes,
             modified_unix: file.modified_unix,
             content_hash: file.content_hash.clone(),
-            outgoing_edges: render_edges(&outgoing_all),
-            incoming_edges: render_edges(&incoming_all),
+            outgoing_edges: render_edges(&ordered_edges(&outgoing_all)),
+            incoming_edges: render_edges(&ordered_edges(&incoming_all)),
             connection_counts: ConnectionCounts {
                 outgoing_total: outgoing_all.len(),
                 incoming_total: incoming_all.len(),

@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
@@ -373,7 +375,8 @@ pub fn likely_test_targets(
 
 fn build_index(repo: &RepoInfo) -> Result<RepoIndex> {
     let mut files = Vec::new();
-    collect_files(&repo.root, &repo.root, &mut files)?;
+    let mut source_texts = BTreeMap::new();
+    collect_files(&repo.root, &repo.root, &mut files, &mut source_texts)?;
     files.sort_by(|left, right| left.path.cmp(&right.path));
 
     let source_paths: Vec<String> = files
@@ -383,6 +386,7 @@ fn build_index(repo: &RepoInfo) -> Result<RepoIndex> {
         .collect();
 
     let mut edges = Vec::new();
+    edges.extend(build_rust_edges(&files, &source_texts));
     edges.extend(build_same_area_edges(&files));
     edges.extend(build_test_edges(&files, &source_paths));
     edges.extend(build_config_edges(&files, &source_paths));
@@ -477,6 +481,521 @@ fn build_config_edges(files: &[IndexedFile], source_paths: &[String]) -> Vec<Ind
     edges
 }
 
+fn build_rust_edges(
+    files: &[IndexedFile],
+    source_texts: &BTreeMap<String, String>,
+) -> Vec<IndexedEdge> {
+    let module_lookup = build_rust_module_lookup(files);
+    let mut edges = Vec::new();
+    let mut seen = HashSet::new();
+
+    for file in files
+        .iter()
+        .filter(|file| matches!(file.role, FileRole::Source) && file.path.ends_with(".rs"))
+    {
+        let Some(text) = source_texts.get(&file.path) else {
+            continue;
+        };
+        let module_path = rust_module_path_components(&file.path);
+        let imported_modules = rust_imported_module_names(text, &module_path, &module_lookup);
+
+        for edge in rust_declares_module_edges(file, text, &module_path, &module_lookup) {
+            push_unique_edge(&mut edges, &mut seen, edge);
+        }
+        for edge in rust_import_edges(file, text, &module_path, &module_lookup) {
+            push_unique_edge(&mut edges, &mut seen, edge);
+        }
+        for edge in
+            rust_reference_edges(file, text, &module_path, &module_lookup, &imported_modules)
+        {
+            push_unique_edge(&mut edges, &mut seen, edge);
+        }
+    }
+
+    edges
+}
+
+fn build_rust_module_lookup(files: &[IndexedFile]) -> HashMap<String, String> {
+    let mut lookup = HashMap::new();
+
+    for file in files
+        .iter()
+        .filter(|file| matches!(file.role, FileRole::Source) && file.path.ends_with(".rs"))
+    {
+        if let Some(key) = rust_module_lookup_key(&file.path) {
+            lookup.entry(key).or_insert_with(|| file.path.clone());
+        }
+    }
+
+    lookup
+}
+
+fn push_unique_edge(
+    edges: &mut Vec<IndexedEdge>,
+    seen: &mut HashSet<(String, String, String)>,
+    edge: IndexedEdge,
+) {
+    let key = (edge.edge_type.clone(), edge.from.clone(), edge.to.clone());
+    if seen.insert(key) {
+        edges.push(edge);
+    }
+}
+
+fn rust_declares_module_edges(
+    file: &IndexedFile,
+    text: &str,
+    module_path: &[String],
+    module_lookup: &HashMap<String, String>,
+) -> Vec<IndexedEdge> {
+    let mut edges = Vec::new();
+    let mut seen = HashSet::new();
+
+    for line in text.lines() {
+        let line = strip_line_comment(line).trim();
+        if let Some(module_name) = parse_rust_mod_declaration(line) {
+            let mut candidate = module_path.to_vec();
+            candidate.push(module_name.clone());
+            if let Some(target) = resolve_rust_module_path(&candidate, module_lookup) {
+                let key = target.clone();
+                if seen.insert(key.clone()) {
+                    edges.push(IndexedEdge {
+                        edge_type: "declares_module".to_string(),
+                        from: file.path.clone(),
+                        to: target,
+                        confidence: EdgeConfidence::Extracted,
+                        reason: format!("declares module {module_name}"),
+                    });
+                }
+            }
+        }
+    }
+
+    edges
+}
+
+fn rust_import_edges(
+    file: &IndexedFile,
+    text: &str,
+    module_path: &[String],
+    module_lookup: &HashMap<String, String>,
+) -> Vec<IndexedEdge> {
+    let mut edges = Vec::new();
+    let mut seen = HashSet::new();
+
+    for line in text.lines() {
+        let line = strip_line_comment(line).trim();
+        if let Some(import_body) = parse_rust_use_statement(line) {
+            for path in expand_rust_use_paths(import_body) {
+                if let Some((target_path, confidence)) =
+                    resolve_rust_use_path(&path, module_path, module_lookup)
+                {
+                    if seen.insert(target_path.clone()) {
+                        let target_display = rust_module_display_path_from_path(&target_path)
+                            .unwrap_or_else(|| path.join("::"));
+                        edges.push(IndexedEdge {
+                            edge_type: "imports".to_string(),
+                            from: file.path.clone(),
+                            to: target_path,
+                            confidence,
+                            reason: format!("imports {target_display}"),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    edges
+}
+
+fn rust_reference_edges(
+    file: &IndexedFile,
+    text: &str,
+    _module_path: &[String],
+    module_lookup: &HashMap<String, String>,
+    imported_modules: &HashSet<String>,
+) -> Vec<IndexedEdge> {
+    let mut edges = Vec::new();
+    let mut seen = HashSet::new();
+    let local_module_names = rust_local_module_names(module_lookup);
+
+    for line in text.lines() {
+        let line = strip_line_comment(line).trim();
+        if line.starts_with("use ")
+            || line.starts_with("pub use ")
+            || line.starts_with("mod ")
+            || line.starts_with("pub mod ")
+        {
+            continue;
+        }
+
+        for candidate in rust_reference_candidates(line, "crate::") {
+            if let Some((target_path, _)) = resolve_rust_use_path(&candidate, &[], module_lookup) {
+                if seen.insert(target_path.clone()) {
+                    let target_display = rust_module_display_path_from_path(&target_path)
+                        .unwrap_or_else(|| candidate.join("::"));
+                    edges.push(IndexedEdge {
+                        edge_type: "references".to_string(),
+                        from: file.path.clone(),
+                        to: target_path,
+                        confidence: EdgeConfidence::Extracted,
+                        reason: format!("references {target_display}"),
+                    });
+                }
+            }
+        }
+
+        for module_name in imported_modules.iter().chain(local_module_names.iter()) {
+            if !contains_bare_module_reference(line, module_name) {
+                continue;
+            }
+            let candidate = vec![module_name.clone()];
+            if let Some(target_path) = resolve_rust_module_path(&candidate, module_lookup) {
+                if seen.insert(target_path.clone()) {
+                    let target_display = rust_module_display_path_from_path(&target_path)
+                        .unwrap_or_else(|| module_name.clone());
+                    edges.push(IndexedEdge {
+                        edge_type: "references".to_string(),
+                        from: file.path.clone(),
+                        to: target_path,
+                        confidence: if imported_modules.contains(module_name) {
+                            EdgeConfidence::Extracted
+                        } else {
+                            EdgeConfidence::Inferred
+                        },
+                        reason: if imported_modules.contains(module_name) {
+                            format!("references {target_display}")
+                        } else {
+                            format!("references {target_display}")
+                        },
+                    });
+                }
+            }
+        }
+    }
+
+    edges
+}
+
+fn rust_imported_module_names(
+    text: &str,
+    module_path: &[String],
+    module_lookup: &HashMap<String, String>,
+) -> HashSet<String> {
+    let mut modules = HashSet::new();
+
+    for line in text.lines() {
+        let line = strip_line_comment(line).trim();
+        if let Some(import_body) = parse_rust_use_statement(line) {
+            for path in expand_rust_use_paths(import_body) {
+                if let Some((target_path, _)) =
+                    resolve_rust_use_path(&path, module_path, module_lookup)
+                {
+                    if let Some(name) = rust_module_name_from_path(&target_path) {
+                        modules.insert(name);
+                    }
+                }
+            }
+        }
+    }
+
+    modules
+}
+
+fn rust_local_module_names(module_lookup: &HashMap<String, String>) -> HashSet<String> {
+    module_lookup
+        .keys()
+        .filter_map(|key| key.split('/').next().map(|part| part.to_string()))
+        .collect()
+}
+
+fn rust_module_lookup_key(path: &str) -> Option<String> {
+    let normalized = path.replace('\\', "/");
+    let stripped = if let Some(value) = normalized.strip_prefix("src/") {
+        value.to_string()
+    } else {
+        normalized
+    };
+
+    let key = if let Some(value) = stripped.strip_suffix("/mod.rs") {
+        value.to_string()
+    } else if let Some(value) = stripped.strip_suffix(".rs") {
+        value.to_string()
+    } else {
+        return None;
+    };
+
+    if key.is_empty() {
+        None
+    } else {
+        Some(key)
+    }
+}
+
+fn rust_module_path_components(path: &str) -> Vec<String> {
+    let normalized = path.replace('\\', "/");
+    let stripped = if let Some(value) = normalized.strip_prefix("src/") {
+        value.to_string()
+    } else {
+        normalized
+    };
+
+    let module_path = if stripped == "main.rs" || stripped == "lib.rs" {
+        String::new()
+    } else if let Some(value) = stripped.strip_suffix("/mod.rs") {
+        value.to_string()
+    } else if let Some(value) = stripped.strip_suffix(".rs") {
+        value.to_string()
+    } else {
+        stripped
+    };
+
+    module_path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| segment.to_string())
+        .collect()
+}
+
+fn rust_module_name_from_path(path: &str) -> Option<String> {
+    rust_module_lookup_key(path).and_then(|key| key.split('/').next().map(|part| part.to_string()))
+}
+
+fn rust_module_display_path_from_path(path: &str) -> Option<String> {
+    let components = rust_module_path_components(path);
+    if components.is_empty() {
+        None
+    } else {
+        Some(format!("crate::{}", components.join("::")))
+    }
+}
+
+fn resolve_rust_module_path(
+    candidate: &[String],
+    module_lookup: &HashMap<String, String>,
+) -> Option<String> {
+    for end in (1..=candidate.len()).rev() {
+        let key = candidate[..end].join("/");
+        if let Some(path) = module_lookup.get(&key) {
+            return Some(path.clone());
+        }
+    }
+
+    None
+}
+
+fn resolve_rust_use_path(
+    candidate: &[String],
+    current_module_path: &[String],
+    module_lookup: &HashMap<String, String>,
+) -> Option<(String, EdgeConfidence)> {
+    if candidate.is_empty() {
+        return None;
+    }
+
+    let (base, relative) = match candidate.first().map(|part| part.as_str()) {
+        Some("crate") => (&[][..], &candidate[1..]),
+        Some("super") => {
+            let parent_len = current_module_path.len().saturating_sub(1);
+            (&current_module_path[..parent_len], &candidate[1..])
+        }
+        Some("self") => (current_module_path, &candidate[1..]),
+        _ => (&[][..], candidate),
+    };
+
+    let mut combined = base.to_vec();
+    combined.extend(relative.iter().cloned());
+
+    resolve_rust_module_path(&combined, module_lookup).map(|target| {
+        let confidence = if matches!(candidate.first().map(|part| part.as_str()), Some("crate")) {
+            EdgeConfidence::Extracted
+        } else {
+            EdgeConfidence::Extracted
+        };
+        (target, confidence)
+    })
+}
+
+fn parse_rust_mod_declaration(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    let trimmed = trimmed.strip_prefix("pub ").unwrap_or(trimmed);
+    let remainder = trimmed.strip_prefix("mod ")?;
+    let name = remainder.strip_suffix(';')?.trim();
+    if is_rust_identifier(name) {
+        Some(name.to_string())
+    } else {
+        None
+    }
+}
+
+fn parse_rust_use_statement(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let trimmed = trimmed.strip_prefix("pub ").unwrap_or(trimmed);
+    trimmed
+        .strip_prefix("use ")?
+        .strip_suffix(';')
+        .map(str::trim)
+}
+
+fn expand_rust_use_paths(body: &str) -> Vec<Vec<String>> {
+    let body = body.trim();
+    if body.is_empty() {
+        return Vec::new();
+    }
+
+    if let Some(open_brace) = body.find('{') {
+        if let Some(close_brace) = matching_brace(body, open_brace) {
+            let mut prefix = body[..open_brace].trim();
+            prefix = prefix.strip_suffix("::").unwrap_or(prefix).trim();
+            let prefix_segments = parse_rust_path_segments(prefix);
+            let inner = &body[open_brace + 1..close_brace];
+            let mut paths = Vec::new();
+            for part in split_top_level_commas(inner) {
+                let item = part.trim();
+                if item.is_empty() {
+                    continue;
+                }
+                let mut segments = prefix_segments.clone();
+                segments.extend(parse_rust_path_segments(strip_rust_alias(item)));
+                if !segments.is_empty() {
+                    paths.push(segments);
+                }
+            }
+            return paths;
+        }
+    }
+
+    let segments = parse_rust_path_segments(strip_rust_alias(body));
+    if segments.is_empty() {
+        Vec::new()
+    } else {
+        vec![segments]
+    }
+}
+
+fn parse_rust_path_segments(text: &str) -> Vec<String> {
+    text.split("::")
+        .filter_map(|part| {
+            let trimmed = part.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .collect()
+}
+
+fn strip_rust_alias(text: &str) -> &str {
+    text.split_once(" as ")
+        .map(|(value, _)| value)
+        .unwrap_or(text)
+}
+
+fn split_top_level_commas(text: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+
+    for (idx, ch) in text.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(text[start..idx].trim());
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    parts.push(text[start..].trim());
+    parts
+}
+
+fn matching_brace(text: &str, open_idx: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (idx, ch) in text.char_indices().skip_while(|(idx, _)| *idx < open_idx) {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn strip_line_comment(line: &str) -> &str {
+    line.split_once("//").map(|(head, _)| head).unwrap_or(line)
+}
+
+fn is_rust_identifier(text: &str) -> bool {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(ch) if ch == '_' || ch.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn rust_reference_candidates(line: &str, prefix: &str) -> Vec<Vec<String>> {
+    let mut candidates = Vec::new();
+    let mut remainder = line;
+
+    while let Some(index) = remainder.find(prefix) {
+        let after = &remainder[index + prefix.len()..];
+        let chain = take_rust_path_chain(after);
+        if !chain.is_empty() {
+            let segments = parse_rust_path_segments(chain);
+            if !segments.is_empty() {
+                candidates.push(segments);
+            }
+        }
+        if chain.len() >= after.len() {
+            break;
+        }
+        remainder = &after[chain.len()..];
+    }
+
+    candidates
+}
+
+fn take_rust_path_chain(text: &str) -> &str {
+    let mut end = 0usize;
+    for (idx, ch) in text.char_indices() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == ':' {
+            end = idx + ch.len_utf8();
+            continue;
+        }
+        break;
+    }
+    &text[..end]
+}
+
+fn contains_bare_module_reference(line: &str, module_name: &str) -> bool {
+    let needle = format!("{module_name}::");
+    let mut remainder = line;
+    while let Some(index) = remainder.find(&needle) {
+        let absolute = line.len() - remainder.len() + index;
+        let start_ok = line[..absolute]
+            .chars()
+            .next_back()
+            .map(|ch| !ch.is_ascii_alphanumeric() && ch != '_')
+            .unwrap_or(true);
+        if start_ok {
+            return true;
+        }
+        remainder = &remainder[index + needle.len()..];
+    }
+    false
+}
+
 fn choose_source_roots(source_paths: &[String]) -> Vec<String> {
     let mut roots = Vec::new();
     for candidate in [
@@ -506,7 +1025,12 @@ fn count_roles(files: &[IndexedFile]) -> BTreeMap<FileRole, usize> {
     counts
 }
 
-fn collect_files(root: &Path, current: &Path, out: &mut Vec<IndexedFile>) -> Result<()> {
+fn collect_files(
+    root: &Path,
+    current: &Path,
+    out: &mut Vec<IndexedFile>,
+    source_texts: &mut BTreeMap<String, String>,
+) -> Result<()> {
     for entry in fs::read_dir(current)
         .with_context(|| format!("failed to read directory {}", display_path(current)))?
     {
@@ -518,7 +1042,7 @@ fn collect_files(root: &Path, current: &Path, out: &mut Vec<IndexedFile>) -> Res
             if should_skip_dir(&name) {
                 continue;
             }
-            collect_files(root, &path, out)?;
+            collect_files(root, &path, out, source_texts)?;
             continue;
         }
 
@@ -535,12 +1059,18 @@ fn collect_files(root: &Path, current: &Path, out: &mut Vec<IndexedFile>) -> Res
         let content_hash = maybe_hash_file(&path, metadata.len())?;
 
         out.push(IndexedFile {
-            path: relative_path,
+            path: relative_path.clone(),
             role,
             size_bytes,
             modified_unix,
             content_hash,
         });
+
+        if path.extension().and_then(|value| value.to_str()) == Some("rs") {
+            let contents = fs::read_to_string(&path)
+                .with_context(|| format!("failed to read source file {}", display_path(&path)))?;
+            source_texts.insert(relative_path, contents);
+        }
     }
 
     Ok(())
@@ -767,6 +1297,23 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    fn source_file(path: &str) -> IndexedFile {
+        IndexedFile {
+            path: path.to_string(),
+            role: FileRole::Source,
+            size_bytes: None,
+            modified_unix: None,
+            content_hash: None,
+        }
+    }
+
+    fn source_texts(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
+        entries
+            .iter()
+            .map(|(path, text)| (path.to_string(), text.to_string()))
+            .collect()
+    }
+
     fn unique_temp_dir(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -824,6 +1371,59 @@ mod tests {
         assert!(targets
             .iter()
             .any(|(target, _, _)| target == "src/session.rs"));
+    }
+
+    #[test]
+    fn detects_rust_module_declarations() {
+        let files = vec![source_file("src/main.rs"), source_file("src/search.rs")];
+        let texts = source_texts(&[("src/main.rs", "mod search;")]);
+
+        let edges = build_rust_edges(&files, &texts);
+        assert!(edges.iter().any(|edge| {
+            edge.edge_type == "declares_module"
+                && edge.from == "src/main.rs"
+                && edge.to == "src/search.rs"
+        }));
+    }
+
+    #[test]
+    fn detects_crate_type_imports() {
+        let files = vec![source_file("src/search.rs"), source_file("src/types.rs")];
+        let texts = source_texts(&[("src/search.rs", "use crate::types::SearchMatch;")]);
+
+        let edges = build_rust_edges(&files, &texts);
+        assert!(edges.iter().any(|edge| {
+            edge.edge_type == "imports" && edge.from == "src/search.rs" && edge.to == "src/types.rs"
+        }));
+    }
+
+    #[test]
+    fn detects_grouped_crate_imports() {
+        let files = vec![
+            source_file("src/main.rs"),
+            source_file("src/search.rs"),
+            source_file("src/rank.rs"),
+        ];
+        let texts = source_texts(&[("src/main.rs", "use crate::{search, rank};")]);
+
+        let edges = build_rust_edges(&files, &texts);
+        assert!(edges.iter().any(|edge| {
+            edge.edge_type == "imports" && edge.from == "src/main.rs" && edge.to == "src/search.rs"
+        }));
+        assert!(edges.iter().any(|edge| {
+            edge.edge_type == "imports" && edge.from == "src/main.rs" && edge.to == "src/rank.rs"
+        }));
+    }
+
+    #[test]
+    fn keeps_same_area_edges() {
+        let files = vec![source_file("src/search.rs"), source_file("src/types.rs")];
+        let edges = build_same_area_edges(&files);
+        assert!(edges.iter().any(|edge| {
+            edge.edge_type == "same_area"
+                && edge.from == "src/search.rs"
+                && edge.to == "src/types.rs"
+        }));
     }
 
     #[test]
