@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FindReport {
@@ -97,6 +98,39 @@ impl SearchCoverage {
         self.limited = displayed_candidate_count < self.raw_candidate_file_count;
         self
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MapReport {
+    pub path: String,
+    pub role: String,
+    pub index_status: String,
+    pub index_path: String,
+    pub repo_rev: Option<String>,
+    pub size_bytes: Option<u64>,
+    pub modified_unix: Option<u64>,
+    pub content_hash: Option<String>,
+    pub outgoing_edges: Vec<MapEdge>,
+    pub incoming_edges: Vec<MapEdge>,
+    pub connection_counts: ConnectionCounts,
+    pub next_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MapEdge {
+    pub edge_type: String,
+    pub from: String,
+    pub to: String,
+    pub confidence: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConnectionCounts {
+    pub outgoing_total: usize,
+    pub incoming_total: usize,
+    pub outgoing_by_type: BTreeMap<String, usize>,
+    pub incoming_by_type: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Clone)]

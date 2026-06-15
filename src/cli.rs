@@ -26,4 +26,12 @@ pub enum Commands {
         #[arg(long, conflicts_with = "status")]
         clear: bool,
     },
+    /// Show a compact file card from the index.
+    Map {
+        /// Path relative to the repo root.
+        path: String,
+        /// Emit stable JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
 }

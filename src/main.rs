@@ -1,5 +1,6 @@
 mod cli;
 mod index;
+mod map;
 mod output;
 mod rank;
 mod repo;
@@ -55,6 +56,11 @@ fn run() -> Result<()> {
                 let report = index::build(&repo)?;
                 index::write_build_report(&report)?;
             }
+        }
+        cli::Commands::Map { path, json } => {
+            let repo = repo::discover()?;
+            let report = map::build_report(&repo, &path)?;
+            map::write_report(&report, json)?;
         }
     }
 

@@ -116,6 +116,13 @@ pub struct IndexStatusReport {
     pub indexed_rev: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct LoadedIndex {
+    pub index_path: PathBuf,
+    pub state: IndexState,
+    pub index: Option<RepoIndex>,
+}
+
 #[derive(Debug)]
 pub struct IndexClearReport {
     pub index_path: PathBuf,
@@ -165,14 +172,12 @@ pub fn build(repo: &RepoInfo) -> Result<IndexBuildReport> {
 }
 
 pub fn status(repo: &RepoInfo) -> Result<IndexStatusReport> {
-    let index_path = index_path(repo);
-    let maybe_index = read_index_file(&index_path)?;
-    let state = determine_state(repo, maybe_index.as_ref());
+    let loaded = load(repo)?;
 
-    if let Some(index) = maybe_index {
+    if let Some(index) = loaded.index {
         Ok(IndexStatusReport {
-            index_path,
-            state,
+            index_path: loaded.index_path,
+            state: loaded.state,
             file_count: index.stats.file_count,
             role_counts: index.stats.role_counts,
             connection_count: index.stats.connection_count,
@@ -181,8 +186,8 @@ pub fn status(repo: &RepoInfo) -> Result<IndexStatusReport> {
         })
     } else {
         Ok(IndexStatusReport {
-            index_path,
-            state,
+            index_path: loaded.index_path,
+            state: loaded.state,
             file_count: 0,
             role_counts: BTreeMap::new(),
             connection_count: 0,
@@ -217,6 +222,18 @@ pub fn clear(repo: &RepoInfo) -> Result<IndexClearReport> {
     })
 }
 
+pub fn load(repo: &RepoInfo) -> Result<LoadedIndex> {
+    let index_path = index_path(repo);
+    let index = read_index_file(&index_path)?;
+    let state = determine_state(repo, index.as_ref());
+
+    Ok(LoadedIndex {
+        index_path,
+        state,
+        index,
+    })
+}
+
 pub fn write_build_report(report: &IndexBuildReport) -> Result<()> {
     println!("Index written:");
     println!("- files indexed: {}", report.file_count);
@@ -247,6 +264,9 @@ pub fn write_status_report(report: &IndexStatusReport) -> Result<()> {
     }
     if let Some(indexed_rev) = &report.indexed_rev {
         println!("- indexed rev: {}", indexed_rev);
+    }
+    if report.state == IndexState::Unverifiable && report.repo_rev.is_none() {
+        println!("- note: unverifiable because repo revision is unavailable");
     }
     Ok(())
 }
