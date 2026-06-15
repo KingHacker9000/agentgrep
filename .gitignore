@@ -1,0 +1,15 @@
+/target/
+/.agentgrep/
+/manual-test/
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Keep the lockfile for this binary CLI checked in.
