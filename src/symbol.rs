@@ -1,20 +1,24 @@
 use anyhow::{anyhow, Result};
 use std::collections::BTreeMap;
 
-use crate::index::{self, FileRole, IndexedEdge, IndexedFile};
+use crate::index::{
+    self, EdgeConfidence, FileRole, IndexedEdge, IndexedFile, IndexedSymbolReference,
+    ReferenceContext,
+};
 use crate::map;
 use crate::repo::RepoInfo;
 use crate::types::{IndexedSymbol, MapEdge, SymbolMatch, SymbolMatchMode, SymbolReport};
 
 const SYMBOL_MATCH_LIMIT: usize = 5;
 const SYMBOL_EDGE_DISPLAY_LIMIT: usize = 3;
+const SYMBOL_REFERENCE_DISPLAY_LIMIT: usize = 3;
 
 pub fn build_report(repo: &RepoInfo, query: &str) -> Result<SymbolReport> {
     let loaded = index::load(repo)?;
     build_report_from_loaded(repo, &loaded, query)
 }
 
-fn build_report_from_loaded(
+pub(crate) fn build_report_from_loaded(
     repo: &RepoInfo,
     loaded: &index::LoadedIndex,
     query: &str,
@@ -120,6 +124,7 @@ fn render_match(item: &SymbolMatch) {
         println!("  signature: {}", signature);
     }
     println!("  role: {}", item.file_role);
+    render_used_by(&item.used_by);
     render_edges("Outgoing", &item.outgoing_edges);
     render_edges("Incoming", &item.incoming_edges);
     println!("  next:");
@@ -146,6 +151,75 @@ fn render_edges(label: &str, edges: &[MapEdge]) {
             "  - ... showing {} of {}",
             SYMBOL_EDGE_DISPLAY_LIMIT,
             edges.len()
+        );
+    }
+}
+
+fn render_used_by(references: &[IndexedSymbolReference]) {
+    if references.is_empty() {
+        println!("  Used by: none");
+        return;
+    }
+
+    let total = references.iter().map(reference_total_count).sum::<usize>();
+    let production = references
+        .iter()
+        .filter(|reference| matches!(reference.context, ReferenceContext::Production))
+        .map(reference_total_count)
+        .sum::<usize>();
+    let fixture_test = references
+        .iter()
+        .filter(|reference| {
+            matches!(
+                reference.context,
+                ReferenceContext::Fixture | ReferenceContext::Test
+            )
+        })
+        .map(reference_total_count)
+        .sum::<usize>();
+    let unknown = references
+        .iter()
+        .filter(|reference| matches!(reference.context, ReferenceContext::Unknown))
+        .map(reference_total_count)
+        .sum::<usize>();
+
+    print!(
+        "  Used by ({} total; production {}; test/fixture {}",
+        total, production, fixture_test
+    );
+    if unknown > 0 {
+        print!("; unknown {}", unknown);
+    }
+    println!("):");
+
+    for reference in references.iter().take(SYMBOL_REFERENCE_DISPLAY_LIMIT) {
+        let extra = reference.additional_count;
+        let mut details = format!(
+            "{}:{} [{} / {}] {}",
+            reference.from_file,
+            reference.line_number,
+            reference.context,
+            reference.confidence,
+            reference.reason
+        );
+        if let Some(target_file) = &reference.target_file {
+            details.push_str(" -> ");
+            details.push_str(target_file);
+        }
+        if let Some(target_line) = reference.target_line {
+            details.push(':');
+            details.push_str(&target_line.to_string());
+        }
+        if extra > 0 {
+            details.push_str(&format!(" (+{} more)", extra));
+        }
+        println!("  - {details}");
+    }
+    if references.len() > SYMBOL_REFERENCE_DISPLAY_LIMIT {
+        println!(
+            "  - ... showing {} of {}",
+            SYMBOL_REFERENCE_DISPLAY_LIMIT,
+            references.len()
         );
     }
 }
@@ -213,9 +287,82 @@ fn build_symbol_file_context(
     SymbolMatch {
         symbol: symbol.clone(),
         file_role: context.file_role,
+        used_by: collect_used_by(index, symbol),
         outgoing_edges: context.outgoing_edges,
         incoming_edges: context.incoming_edges,
         next_actions: context.next_actions,
+    }
+}
+
+fn collect_used_by(
+    index: &index::RepoIndex,
+    symbol: &IndexedSymbol,
+) -> Vec<IndexedSymbolReference> {
+    let mut grouped = BTreeMap::new();
+    for reference in index
+        .symbol_references
+        .iter()
+        .filter(|reference| {
+            reference.symbol_name == symbol.name
+                && reference.target_file.as_ref() == Some(&symbol.file_path)
+        })
+        .cloned()
+    {
+        let key = (
+            reference.from_file.clone(),
+            reference.symbol_name.clone(),
+            reference.target_file.clone(),
+            reference.context,
+            reference.confidence.clone(),
+            reference.reason.clone(),
+        );
+        grouped
+            .entry(key)
+            .and_modify(|existing: &mut IndexedSymbolReference| {
+                existing.additional_count += reference.additional_count + 1;
+                if reference.line_number < existing.line_number {
+                    existing.line_number = reference.line_number;
+                }
+                if existing.target_line.is_none() {
+                    existing.target_line = reference.target_line;
+                }
+            })
+            .or_insert(reference);
+    }
+
+    let mut references = grouped.into_values().collect::<Vec<_>>();
+    references.sort_by(|left, right| {
+        reference_context_priority(left.context)
+            .cmp(&reference_context_priority(right.context))
+            .then_with(|| {
+                reference_confidence_priority(&left.confidence)
+                    .cmp(&reference_confidence_priority(&right.confidence))
+            })
+            .then_with(|| left.from_file.cmp(&right.from_file))
+            .then_with(|| left.line_number.cmp(&right.line_number))
+            .then_with(|| left.reason.cmp(&right.reason))
+    });
+    references
+}
+
+fn reference_total_count(reference: &IndexedSymbolReference) -> usize {
+    reference.additional_count + 1
+}
+
+fn reference_context_priority(context: ReferenceContext) -> usize {
+    match context {
+        ReferenceContext::Production => 0,
+        ReferenceContext::Fixture => 1,
+        ReferenceContext::Test => 2,
+        ReferenceContext::Unknown => 3,
+    }
+}
+
+fn reference_confidence_priority(confidence: &EdgeConfidence) -> usize {
+    match confidence {
+        EdgeConfidence::Extracted => 0,
+        EdgeConfidence::Inferred => 1,
+        EdgeConfidence::Ambiguous => 2,
     }
 }
 
@@ -392,12 +539,14 @@ mod tests {
                 indexed_at_unix: 1,
                 files,
                 symbols,
+                symbol_references: vec![],
                 edges,
                 stats: IndexStats {
                     file_count: 2,
                     role_counts: std::collections::BTreeMap::from([(FileRole::Source, 2)]),
                     symbol_count: 0,
                     symbol_kind_counts: std::collections::BTreeMap::new(),
+                    symbol_reference_count: 0,
                     connection_count: 2,
                 },
             }),
@@ -475,7 +624,53 @@ mod tests {
 
     #[test]
     fn json_shape_includes_symbol_and_file_context() {
-        let loaded = loaded_index(vec![symbol("SearchResult", "src/types.rs", 12)]);
+        let loaded = index::LoadedIndex {
+            index_path: PathBuf::from("C:/repo/.agentgrep/index.json"),
+            state: IndexState::Fresh,
+            index: Some(RepoIndex {
+                schema_version: crate::index::INDEX_SCHEMA_VERSION,
+                repo_root: "C:/repo".to_string(),
+                repo_rev: Some("abc".to_string()),
+                indexed_at_unix: 1,
+                files: vec![
+                    IndexedFile {
+                        path: "src/types.rs".to_string(),
+                        role: FileRole::Source,
+                        size_bytes: Some(100),
+                        modified_unix: Some(1),
+                        content_hash: Some("aa".to_string()),
+                    },
+                    IndexedFile {
+                        path: "src/search.rs".to_string(),
+                        role: FileRole::Source,
+                        size_bytes: Some(100),
+                        modified_unix: Some(1),
+                        content_hash: Some("bb".to_string()),
+                    },
+                ],
+                symbols: vec![symbol("SearchResult", "src/types.rs", 12)],
+                symbol_references: vec![crate::index::IndexedSymbolReference {
+                    from_file: "src/search.rs".to_string(),
+                    symbol_name: "SearchResult".to_string(),
+                    target_file: Some("src/types.rs".to_string()),
+                    target_line: Some(12),
+                    line_number: 3,
+                    confidence: EdgeConfidence::Extracted,
+                    reason: "use statement reference".to_string(),
+                    context: crate::index::ReferenceContext::Production,
+                    additional_count: 0,
+                }],
+                edges: vec![],
+                stats: IndexStats {
+                    file_count: 2,
+                    role_counts: std::collections::BTreeMap::from([(FileRole::Source, 2)]),
+                    symbol_count: 1,
+                    symbol_kind_counts: std::collections::BTreeMap::new(),
+                    symbol_reference_count: 1,
+                    connection_count: 0,
+                },
+            }),
+        };
         let report = build_report_from_loaded(&repo(), &loaded, "SearchResult").unwrap();
 
         let json = serde_json::to_value(&report).unwrap();
@@ -483,8 +678,91 @@ mod tests {
         assert_eq!(json["matches"].as_array().unwrap().len(), 1);
         assert_eq!(json["matches"][0]["symbol"]["name"], "SearchResult");
         assert_eq!(json["matches"][0]["file_role"], "source");
+        assert_eq!(json["matches"][0]["used_by"].as_array().unwrap().len(), 1);
         assert!(json["matches"][0]["outgoing_edges"].is_array());
         assert!(json["matches"][0]["incoming_edges"].is_array());
+    }
+
+    #[test]
+    fn collect_used_by_groups_repeated_fixture_references_and_sorts_production_first() {
+        let index = RepoIndex {
+            schema_version: crate::index::INDEX_SCHEMA_VERSION,
+            repo_root: "C:/repo".to_string(),
+            repo_rev: Some("abc".to_string()),
+            indexed_at_unix: 1,
+            files: vec![IndexedFile {
+                path: "src/search.rs".to_string(),
+                role: FileRole::Source,
+                size_bytes: Some(100),
+                modified_unix: Some(1),
+                content_hash: Some("aa".to_string()),
+            }],
+            symbols: vec![],
+            symbol_references: vec![
+                crate::index::IndexedSymbolReference {
+                    from_file: "src/main.rs".to_string(),
+                    symbol_name: "SearchResult".to_string(),
+                    target_file: Some("src/search.rs".to_string()),
+                    target_line: Some(11),
+                    line_number: 24,
+                    confidence: EdgeConfidence::Extracted,
+                    reason: "use statement reference".to_string(),
+                    context: crate::index::ReferenceContext::Production,
+                    additional_count: 0,
+                },
+                crate::index::IndexedSymbolReference {
+                    from_file: "src/symbol.rs".to_string(),
+                    symbol_name: "SearchResult".to_string(),
+                    target_file: Some("src/search.rs".to_string()),
+                    target_line: Some(11),
+                    line_number: 478,
+                    confidence: EdgeConfidence::Inferred,
+                    reason: "qualified or token reference".to_string(),
+                    context: crate::index::ReferenceContext::Fixture,
+                    additional_count: 0,
+                },
+                crate::index::IndexedSymbolReference {
+                    from_file: "src/symbol.rs".to_string(),
+                    symbol_name: "SearchResult".to_string(),
+                    target_file: Some("src/search.rs".to_string()),
+                    target_line: Some(11),
+                    line_number: 479,
+                    confidence: EdgeConfidence::Inferred,
+                    reason: "qualified or token reference".to_string(),
+                    context: crate::index::ReferenceContext::Fixture,
+                    additional_count: 0,
+                },
+            ],
+            edges: vec![],
+            stats: IndexStats {
+                file_count: 1,
+                role_counts: BTreeMap::from([(FileRole::Source, 1)]),
+                symbol_count: 1,
+                symbol_kind_counts: BTreeMap::new(),
+                symbol_reference_count: 3,
+                connection_count: 0,
+            },
+        };
+        let symbol = IndexedSymbol {
+            name: "SearchResult".to_string(),
+            kind: crate::types::SymbolKind::Struct,
+            file_path: "src/search.rs".to_string(),
+            line_number: 11,
+            visibility: crate::types::Visibility::Public,
+            signature: Some("pub struct SearchResult {".to_string()),
+        };
+
+        let references = collect_used_by(&index, &symbol);
+        assert_eq!(references.len(), 2);
+        assert_eq!(
+            references[0].context,
+            crate::index::ReferenceContext::Production
+        );
+        assert_eq!(
+            references[1].context,
+            crate::index::ReferenceContext::Fixture
+        );
+        assert_eq!(references[1].additional_count, 1);
     }
 
     #[test]

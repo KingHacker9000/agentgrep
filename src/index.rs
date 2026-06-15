@@ -15,7 +15,7 @@ use crate::repo::{display_path, RepoInfo};
 use crate::text::shorten_snippet;
 use crate::types::{IndexedSymbol, SymbolKind, Visibility};
 
-pub const INDEX_SCHEMA_VERSION: u32 = 3;
+pub const INDEX_SCHEMA_VERSION: u32 = 5;
 pub const HASH_LIMIT_BYTES: u64 = 1024 * 256;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +27,8 @@ pub struct RepoIndex {
     pub files: Vec<IndexedFile>,
     #[serde(default)]
     pub symbols: Vec<IndexedSymbol>,
+    #[serde(default)]
+    pub symbol_references: Vec<IndexedSymbolReference>,
     pub edges: Vec<IndexedEdge>,
     pub stats: IndexStats,
 }
@@ -38,6 +40,48 @@ pub struct IndexedFile {
     pub size_bytes: Option<u64>,
     pub modified_unix: Option<u64>,
     pub content_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexedSymbolReference {
+    pub from_file: String,
+    pub symbol_name: String,
+    pub target_file: Option<String>,
+    pub target_line: Option<usize>,
+    pub line_number: usize,
+    pub confidence: EdgeConfidence,
+    pub reason: String,
+    #[serde(default)]
+    pub context: ReferenceContext,
+    #[serde(default)]
+    pub additional_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum ReferenceContext {
+    Production,
+    Test,
+    Fixture,
+    Unknown,
+}
+
+impl Default for ReferenceContext {
+    fn default() -> Self {
+        ReferenceContext::Production
+    }
+}
+
+impl std::fmt::Display for ReferenceContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            ReferenceContext::Production => "production",
+            ReferenceContext::Test => "test",
+            ReferenceContext::Fixture => "fixture",
+            ReferenceContext::Unknown => "unknown",
+        };
+        write!(f, "{value}")
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +101,8 @@ pub struct IndexStats {
     pub symbol_count: usize,
     #[serde(default)]
     pub symbol_kind_counts: BTreeMap<SymbolKind, usize>,
+    #[serde(default)]
+    pub symbol_reference_count: usize,
     pub connection_count: usize,
 }
 
@@ -87,7 +133,7 @@ impl std::fmt::Display for FileRole {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EdgeConfidence {
     Extracted,
@@ -114,6 +160,7 @@ pub struct IndexBuildReport {
     pub role_counts: BTreeMap<FileRole, usize>,
     pub symbol_count: usize,
     pub symbol_kind_counts: BTreeMap<SymbolKind, usize>,
+    pub symbol_reference_count: usize,
     pub connection_count: usize,
 }
 
@@ -125,6 +172,7 @@ pub struct IndexStatusReport {
     pub role_counts: BTreeMap<FileRole, usize>,
     pub symbol_count: usize,
     pub symbol_kind_counts: BTreeMap<SymbolKind, usize>,
+    pub symbol_reference_count: usize,
     pub connection_count: usize,
     pub repo_rev: Option<String>,
     pub indexed_rev: Option<String>,
@@ -183,6 +231,7 @@ pub fn build(repo: &RepoInfo) -> Result<IndexBuildReport> {
         role_counts: index.stats.role_counts.clone(),
         symbol_count: index.stats.symbol_count,
         symbol_kind_counts: index.stats.symbol_kind_counts.clone(),
+        symbol_reference_count: index.stats.symbol_reference_count,
         connection_count: index.stats.connection_count,
     })
 }
@@ -198,6 +247,7 @@ pub fn status(repo: &RepoInfo) -> Result<IndexStatusReport> {
             role_counts: index.stats.role_counts,
             symbol_count: index.stats.symbol_count,
             symbol_kind_counts: index.stats.symbol_kind_counts,
+            symbol_reference_count: index.stats.symbol_reference_count,
             connection_count: index.stats.connection_count,
             repo_rev: repo.rev.clone(),
             indexed_rev: index.repo_rev,
@@ -210,6 +260,7 @@ pub fn status(repo: &RepoInfo) -> Result<IndexStatusReport> {
             role_counts: BTreeMap::new(),
             symbol_count: 0,
             symbol_kind_counts: BTreeMap::new(),
+            symbol_reference_count: 0,
             connection_count: 0,
             repo_rev: repo.rev.clone(),
             indexed_rev: None,
@@ -266,6 +317,10 @@ pub fn write_build_report(report: &IndexBuildReport) -> Result<()> {
         "- symbol kinds: {}",
         format_symbol_kind_counts(&report.symbol_kind_counts)
     );
+    println!(
+        "- symbol references indexed: {}",
+        report.symbol_reference_count
+    );
     println!("- connections counted: {}", report.connection_count);
     println!("- index path: {}", display_path(&report.index_path));
     println!(
@@ -287,6 +342,10 @@ pub fn write_status_report(report: &IndexStatusReport) -> Result<()> {
     println!(
         "- symbol kinds: {}",
         format_symbol_kind_counts(&report.symbol_kind_counts)
+    );
+    println!(
+        "- symbol references indexed: {}",
+        report.symbol_reference_count
     );
     println!("- connections counted: {}", report.connection_count);
     if let Some(repo_rev) = &report.repo_rev {
@@ -414,6 +473,8 @@ fn build_index(repo: &RepoInfo) -> Result<RepoIndex> {
         .collect();
 
     let symbols = build_rust_symbols(&files, &source_texts);
+    let symbol_references = build_rust_symbol_references(&files, &source_texts, &symbols);
+    let symbol_reference_count = symbol_references.len();
     let mut edges = Vec::new();
     edges.extend(build_rust_edges(&files, &source_texts));
     edges.extend(build_same_area_edges(&files));
@@ -433,12 +494,14 @@ fn build_index(repo: &RepoInfo) -> Result<RepoIndex> {
         indexed_at_unix,
         files,
         symbols,
+        symbol_references,
         edges: edges.clone(),
         stats: IndexStats {
             file_count,
             role_counts,
             symbol_count,
             symbol_kind_counts,
+            symbol_reference_count,
             connection_count: edges.len(),
         },
     })
@@ -545,6 +608,403 @@ fn count_symbol_kinds(symbols: &[IndexedSymbol]) -> BTreeMap<SymbolKind, usize> 
         *counts.entry(symbol.kind.clone()).or_insert(0) += 1;
     }
     counts
+}
+
+fn build_rust_symbol_references(
+    files: &[IndexedFile],
+    source_texts: &BTreeMap<String, String>,
+    symbols: &[IndexedSymbol],
+) -> Vec<IndexedSymbolReference> {
+    let symbol_lookup = build_referenceable_symbol_lookup(symbols);
+    let referenceable_names = build_referenceable_symbol_names(&symbol_lookup);
+    let definition_lines = build_symbol_definition_lines(symbols);
+    let mut grouped = BTreeMap::new();
+
+    for file in files
+        .iter()
+        .filter(|file| matches!(file.role, FileRole::Source) && file.path.ends_with(".rs"))
+    {
+        let Some(text) = source_texts.get(&file.path) else {
+            continue;
+        };
+        let defined_lines = definition_lines.get(&file.path);
+        let mut in_test_section = matches!(file.role, FileRole::Test) || is_test_path(&file.path);
+        let mut current_function_context = if in_test_section {
+            ReferenceContext::Test
+        } else {
+            ReferenceContext::Production
+        };
+        let mut pending_test_attribute = false;
+
+        for (line_index, line) in text.lines().enumerate() {
+            let line_number = line_index + 1;
+            let stripped = strip_line_comment(line).trim();
+            if stripped.is_empty() {
+                continue;
+            }
+
+            if is_test_section_line(stripped) {
+                in_test_section = true;
+                current_function_context = ReferenceContext::Test;
+                pending_test_attribute = false;
+                continue;
+            }
+            if stripped.starts_with("#[test]") {
+                pending_test_attribute = true;
+                continue;
+            }
+
+            if defined_lines
+                .map(|lines| lines.contains(&line_number))
+                .unwrap_or(false)
+            {
+                continue;
+            }
+
+            let line_context = classify_rust_reference_context(
+                file,
+                line_number,
+                stripped,
+                current_function_context,
+                in_test_section,
+            );
+
+            if let Some(use_body) = parse_rust_use_statement(stripped) {
+                for path in expand_rust_use_paths(use_body) {
+                    if let Some(name) = path.last() {
+                        if let Some(reference) = build_symbol_reference_from_name(
+                            file,
+                            line_number,
+                            name,
+                            &symbol_lookup,
+                            line_context,
+                            "use statement reference",
+                            EdgeConfidence::Extracted,
+                        ) {
+                            insert_grouped_reference(&mut grouped, reference);
+                        }
+                    }
+                }
+                if let Some(name) = rust_function_name_from_line(stripped) {
+                    current_function_context = if pending_test_attribute {
+                        pending_test_attribute = false;
+                        ReferenceContext::Test
+                    } else if in_test_section {
+                        classify_test_function_name(&name)
+                    } else {
+                        ReferenceContext::Production
+                    };
+                }
+                continue;
+            }
+
+            let quoted = stripped.contains('"') || stripped.contains('\'');
+            for name in &referenceable_names {
+                if !contains_identifier_reference(stripped, name) {
+                    continue;
+                }
+
+                if quoted && !stripped.contains("::") && !stripped.contains(':') {
+                    continue;
+                }
+                if in_test_section
+                    && !stripped.contains("::")
+                    && !stripped.contains(':')
+                    && !stripped.starts_with("use ")
+                {
+                    continue;
+                }
+
+                if let Some(reference) = build_symbol_reference_from_name(
+                    file,
+                    line_number,
+                    name,
+                    &symbol_lookup,
+                    line_context,
+                    "qualified or token reference",
+                    EdgeConfidence::Inferred,
+                ) {
+                    insert_grouped_reference(&mut grouped, reference);
+                }
+            }
+
+            if let Some(name) = rust_function_name_from_line(stripped) {
+                current_function_context = if pending_test_attribute {
+                    pending_test_attribute = false;
+                    ReferenceContext::Test
+                } else if in_test_section {
+                    classify_test_function_name(&name)
+                } else {
+                    ReferenceContext::Production
+                };
+            }
+        }
+    }
+
+    let mut references = grouped.into_values().collect::<Vec<_>>();
+    references.sort_by(|left, right| {
+        reference_context_priority(left.context)
+            .cmp(&reference_context_priority(right.context))
+            .then_with(|| {
+                reference_confidence_priority(&left.confidence)
+                    .cmp(&reference_confidence_priority(&right.confidence))
+            })
+            .then_with(|| left.from_file.cmp(&right.from_file))
+            .then_with(|| left.line_number.cmp(&right.line_number))
+            .then_with(|| left.symbol_name.cmp(&right.symbol_name))
+    });
+
+    references
+}
+
+fn build_referenceable_symbol_lookup<'a>(
+    symbols: &'a [IndexedSymbol],
+) -> BTreeMap<String, Vec<&'a IndexedSymbol>> {
+    let mut lookup: BTreeMap<String, Vec<&IndexedSymbol>> = BTreeMap::new();
+    for symbol in symbols
+        .iter()
+        .filter(|symbol| is_referenceable_symbol_kind(&symbol.kind))
+    {
+        lookup.entry(symbol.name.clone()).or_default().push(symbol);
+    }
+    lookup
+}
+
+fn build_referenceable_symbol_names(
+    symbol_lookup: &BTreeMap<String, Vec<&IndexedSymbol>>,
+) -> Vec<String> {
+    let mut names = symbol_lookup.keys().cloned().collect::<Vec<_>>();
+    names.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
+    names
+}
+
+fn build_symbol_definition_lines(symbols: &[IndexedSymbol]) -> BTreeMap<String, HashSet<usize>> {
+    let mut lines = BTreeMap::new();
+    for symbol in symbols {
+        lines
+            .entry(symbol.file_path.clone())
+            .or_insert_with(HashSet::new)
+            .insert(symbol.line_number);
+    }
+    lines
+}
+
+fn build_symbol_reference_from_name(
+    file: &IndexedFile,
+    line_number: usize,
+    symbol_name: &str,
+    symbol_lookup: &BTreeMap<String, Vec<&IndexedSymbol>>,
+    context: ReferenceContext,
+    reason: &str,
+    default_confidence: EdgeConfidence,
+) -> Option<IndexedSymbolReference> {
+    let targets = symbol_lookup.get(symbol_name)?;
+    if targets.len() != 1 {
+        return None;
+    }
+
+    let target = targets[0];
+    Some(IndexedSymbolReference {
+        from_file: file.path.clone(),
+        symbol_name: symbol_name.to_string(),
+        target_file: Some(target.file_path.clone()),
+        target_line: Some(target.line_number),
+        line_number,
+        confidence: default_confidence,
+        reason: reason.to_string(),
+        context,
+        additional_count: 0,
+    })
+}
+
+fn insert_grouped_reference(
+    grouped: &mut BTreeMap<
+        (
+            String,
+            String,
+            Option<String>,
+            ReferenceContext,
+            EdgeConfidence,
+            String,
+        ),
+        IndexedSymbolReference,
+    >,
+    reference: IndexedSymbolReference,
+) {
+    let key = reference_key(&reference);
+    grouped
+        .entry(key)
+        .and_modify(|existing| {
+            existing.additional_count += reference.additional_count + 1;
+            if reference.line_number < existing.line_number {
+                existing.line_number = reference.line_number;
+            }
+            if existing.target_line.is_none() {
+                existing.target_line = reference.target_line;
+            }
+        })
+        .or_insert(reference);
+}
+
+fn reference_key(
+    reference: &IndexedSymbolReference,
+) -> (
+    String,
+    String,
+    Option<String>,
+    ReferenceContext,
+    EdgeConfidence,
+    String,
+) {
+    (
+        reference.from_file.clone(),
+        reference.symbol_name.clone(),
+        reference.target_file.clone(),
+        reference.context,
+        reference.confidence.clone(),
+        reference.reason.clone(),
+    )
+}
+
+fn is_referenceable_symbol_kind(kind: &SymbolKind) -> bool {
+    matches!(
+        kind,
+        SymbolKind::Struct
+            | SymbolKind::Enum
+            | SymbolKind::Trait
+            | SymbolKind::TypeAlias
+            | SymbolKind::Const
+            | SymbolKind::Static
+            | SymbolKind::Module
+    )
+}
+
+fn contains_identifier_reference(line: &str, name: &str) -> bool {
+    let mut remainder = line;
+    while let Some(index) = remainder.find(name) {
+        let absolute = line.len() - remainder.len() + index;
+        let before_ok = line[..absolute]
+            .chars()
+            .next_back()
+            .map(|ch| !is_identifier_char(ch))
+            .unwrap_or(true);
+        let after_index = absolute + name.len();
+        let after_ok = line[after_index..]
+            .chars()
+            .next()
+            .map(|ch| !is_identifier_char(ch))
+            .unwrap_or(true);
+        if before_ok && after_ok {
+            return true;
+        }
+        remainder = &remainder[index + name.len()..];
+    }
+    false
+}
+
+fn is_identifier_char(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+fn classify_rust_reference_context(
+    file: &IndexedFile,
+    line_number: usize,
+    stripped: &str,
+    current_function_context: ReferenceContext,
+    in_test_section: bool,
+) -> ReferenceContext {
+    if matches!(file.role, FileRole::Test) || is_test_path(&file.path) {
+        return classify_test_reference_line(stripped, current_function_context);
+    }
+
+    if !in_test_section || line_number == 0 {
+        return ReferenceContext::Production;
+    }
+
+    classify_test_reference_line(stripped, current_function_context)
+}
+
+fn classify_test_reference_line(
+    stripped: &str,
+    current_function_context: ReferenceContext,
+) -> ReferenceContext {
+    if matches!(
+        current_function_context,
+        ReferenceContext::Fixture | ReferenceContext::Test
+    ) {
+        return current_function_context;
+    }
+
+    if stripped.contains("assert!")
+        || stripped.contains("assert_eq!")
+        || stripped.contains("assert_ne!")
+        || stripped.contains("assert_matches!")
+        || stripped.contains("matches!")
+    {
+        return ReferenceContext::Test;
+    }
+
+    if stripped.contains("fixture")
+        || stripped.contains("helper")
+        || stripped.contains("loaded_index")
+        || stripped.contains("source_texts")
+        || stripped.contains("source_file")
+        || stripped.contains("build_")
+        || stripped.contains("make_")
+        || stripped.contains("repo(")
+        || stripped.contains("symbol(")
+    {
+        return ReferenceContext::Fixture;
+    }
+
+    ReferenceContext::Unknown
+}
+
+fn classify_test_function_name(name: &str) -> ReferenceContext {
+    let lower = name.to_lowercase();
+    if lower.contains("test") {
+        ReferenceContext::Test
+    } else if lower.contains("fixture")
+        || lower.contains("helper")
+        || lower.contains("loaded")
+        || lower.contains("source")
+        || lower.contains("build")
+        || lower.contains("make")
+        || lower.contains("repo")
+        || lower.contains("symbol")
+        || lower.contains("setup")
+    {
+        ReferenceContext::Fixture
+    } else {
+        ReferenceContext::Unknown
+    }
+}
+
+fn rust_function_name_from_line(line: &str) -> Option<String> {
+    let (_, remainder) = rust_visibility_prefix(line);
+    let remainder = strip_rust_item_prefixes(remainder);
+    parse_rust_function_symbol(remainder)
+}
+
+fn is_test_section_line(line: &str) -> bool {
+    line.starts_with("#[cfg(test)]") || line.starts_with("mod tests ") || line == "mod tests {"
+}
+
+fn reference_context_priority(context: ReferenceContext) -> usize {
+    match context {
+        ReferenceContext::Production => 0,
+        ReferenceContext::Fixture => 1,
+        ReferenceContext::Test => 2,
+        ReferenceContext::Unknown => 3,
+    }
+}
+
+fn reference_confidence_priority(confidence: &EdgeConfidence) -> usize {
+    match confidence {
+        EdgeConfidence::Extracted => 0,
+        EdgeConfidence::Inferred => 1,
+        EdgeConfidence::Ambiguous => 2,
+    }
 }
 
 fn rust_symbol_from_line(file_path: &str, line_number: usize, line: &str) -> Option<IndexedSymbol> {
@@ -1198,8 +1658,7 @@ fn resolve_rust_use_path(
 }
 
 fn parse_rust_mod_declaration(line: &str) -> Option<String> {
-    let trimmed = line.trim_start();
-    let trimmed = trimmed.strip_prefix("pub ").unwrap_or(trimmed);
+    let (_, trimmed) = rust_visibility_prefix(line);
     let remainder = trimmed.strip_prefix("mod ")?;
     let name = remainder.strip_suffix(';')?.trim();
     if is_rust_identifier(name) {
@@ -1210,8 +1669,7 @@ fn parse_rust_mod_declaration(line: &str) -> Option<String> {
 }
 
 fn parse_rust_use_statement(line: &str) -> Option<&str> {
-    let trimmed = line.trim_start();
-    let trimmed = trimmed.strip_prefix("pub ").unwrap_or(trimmed);
+    let (_, trimmed) = rust_visibility_prefix(line);
     trimmed
         .strip_prefix("use ")?
         .strip_suffix(';')
@@ -1885,6 +2343,158 @@ mod tests {
     }
 
     #[test]
+    fn extracts_symbol_references_from_rust_use_and_token_lines() {
+        let files = vec![source_file("src/search.rs"), source_file("src/types.rs")];
+        let texts = source_texts(&[(
+            "src/search.rs",
+            "pub(crate) use crate::types::SearchMatch;\nfn run() {\n    let _ = SearchMatch;\n}\n",
+        ), (
+            "src/types.rs",
+            "pub struct SearchMatch {}\n",
+        )]);
+
+        let symbols = vec![
+            IndexedSymbol {
+                name: "SearchMatch".to_string(),
+                kind: SymbolKind::Struct,
+                file_path: "src/types.rs".to_string(),
+                line_number: 1,
+                visibility: Visibility::Public,
+                signature: Some("pub struct SearchMatch {}".to_string()),
+            },
+            IndexedSymbol {
+                name: "run".to_string(),
+                kind: SymbolKind::Function,
+                file_path: "src/search.rs".to_string(),
+                line_number: 2,
+                visibility: Visibility::Private,
+                signature: Some("fn run() {".to_string()),
+            },
+        ];
+
+        let references = build_rust_symbol_references(&files, &texts, &symbols);
+        assert!(references.iter().any(|reference| {
+            reference.from_file == "src/search.rs"
+                && reference.symbol_name == "SearchMatch"
+                && reference.target_file.as_deref() == Some("src/types.rs")
+                && reference.confidence == EdgeConfidence::Extracted
+        }));
+        assert!(references.iter().any(|reference| {
+            reference.from_file == "src/search.rs"
+                && reference.symbol_name == "SearchMatch"
+                && reference.target_file.as_deref() == Some("src/types.rs")
+                && reference.confidence == EdgeConfidence::Inferred
+        }));
+        assert!(references
+            .iter()
+            .all(|reference| reference.from_file != "src/types.rs"));
+    }
+
+    #[test]
+    fn skips_ambiguous_symbol_names() {
+        let files = vec![
+            source_file("src/search.rs"),
+            source_file("src/a.rs"),
+            source_file("src/b.rs"),
+        ];
+        let texts = source_texts(&[
+            ("src/search.rs", "use crate::alpha::Helper;\n"),
+            ("src/a.rs", "pub struct Helper {}\n"),
+            ("src/b.rs", "pub struct Helper {}\n"),
+        ]);
+
+        let symbols = vec![
+            IndexedSymbol {
+                name: "Helper".to_string(),
+                kind: SymbolKind::Struct,
+                file_path: "src/a.rs".to_string(),
+                line_number: 1,
+                visibility: Visibility::Public,
+                signature: Some("pub struct Helper {}".to_string()),
+            },
+            IndexedSymbol {
+                name: "Helper".to_string(),
+                kind: SymbolKind::Struct,
+                file_path: "src/b.rs".to_string(),
+                line_number: 1,
+                visibility: Visibility::Public,
+                signature: Some("pub struct Helper {}".to_string()),
+            },
+        ];
+
+        let references = build_rust_symbol_references(&files, &texts, &symbols);
+        assert!(references.is_empty());
+    }
+
+    #[test]
+    fn dedupes_fixture_references_and_marks_context() {
+        let files = vec![source_file("src/search.rs"), source_file("src/types.rs")];
+        let texts = source_texts(&[(
+            "src/search.rs",
+            "#[cfg(test)]\nmod tests {\n    fn loaded_index() {\n        let a: SearchResult = SearchResult {\n        let b: SearchResult = SearchResult {\n    }\n}\n",
+        ), (
+            "src/types.rs",
+            "pub struct SearchResult {}\n",
+        )]);
+
+        let symbols = vec![IndexedSymbol {
+            name: "SearchResult".to_string(),
+            kind: SymbolKind::Struct,
+            file_path: "src/types.rs".to_string(),
+            line_number: 1,
+            visibility: Visibility::Public,
+            signature: Some("pub struct SearchResult {}".to_string()),
+        }];
+
+        let references = build_rust_symbol_references(&files, &texts, &symbols);
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].context, ReferenceContext::Fixture);
+        assert_eq!(references[0].additional_count, 1);
+    }
+
+    #[test]
+    fn detects_search_coverage_references_even_with_impl_block() {
+        let files = vec![source_file("src/search.rs"), source_file("src/types.rs")];
+        let texts = source_texts(&[(
+            "src/search.rs",
+            "use crate::types::SearchCoverage;\nfn run() {\n    let coverage = SearchCoverage::new();\n    let _: SearchCoverage = coverage;\n}\n",
+        ), (
+            "src/types.rs",
+            "pub struct SearchCoverage {}\nimpl SearchCoverage {\n    pub fn new() -> Self { Self {} }\n}\n",
+        )]);
+
+        let symbols = vec![
+            IndexedSymbol {
+                name: "SearchCoverage".to_string(),
+                kind: SymbolKind::Struct,
+                file_path: "src/types.rs".to_string(),
+                line_number: 1,
+                visibility: Visibility::Public,
+                signature: Some("pub struct SearchCoverage {}".to_string()),
+            },
+            IndexedSymbol {
+                name: "SearchCoverage".to_string(),
+                kind: SymbolKind::Impl,
+                file_path: "src/types.rs".to_string(),
+                line_number: 2,
+                visibility: Visibility::Private,
+                signature: Some("impl SearchCoverage {".to_string()),
+            },
+        ];
+
+        let references = build_rust_symbol_references(&files, &texts, &symbols);
+        assert!(references.iter().any(|reference| {
+            reference.symbol_name == "SearchCoverage"
+                && reference.target_file.as_deref() == Some("src/types.rs")
+                && matches!(reference.context, ReferenceContext::Production)
+        }));
+        assert!(references.iter().any(|reference| {
+            reference.symbol_name == "SearchCoverage"
+                && reference.target_file.as_deref() == Some("src/types.rs")
+        }));
+    }
+
+    #[test]
     fn keeps_same_area_edges() {
         let files = vec![source_file("src/search.rs"), source_file("src/types.rs")];
         let edges = build_same_area_edges(&files);
@@ -1910,12 +2520,14 @@ mod tests {
             indexed_at_unix: 1,
             files: vec![],
             symbols: vec![],
+            symbol_references: vec![],
             edges: vec![],
             stats: IndexStats {
                 file_count: 0,
                 role_counts: BTreeMap::new(),
                 symbol_count: 0,
                 symbol_kind_counts: BTreeMap::new(),
+                symbol_reference_count: 0,
                 connection_count: 0,
             },
         };
@@ -1961,6 +2573,7 @@ mod tests {
                 visibility: Visibility::Public,
                 signature: Some("pub fn main()".to_string()),
             }],
+            symbol_references: vec![],
             edges: vec![IndexedEdge {
                 edge_type: "same_area".to_string(),
                 from: "src/main.rs".to_string(),
@@ -1973,6 +2586,7 @@ mod tests {
                 role_counts: BTreeMap::from([(FileRole::Source, 1)]),
                 symbol_count: 1,
                 symbol_kind_counts: BTreeMap::from([(SymbolKind::Function, 1)]),
+                symbol_reference_count: 0,
                 connection_count: 1,
             },
         };
@@ -2003,12 +2617,14 @@ mod tests {
             indexed_at_unix: 1,
             files: vec![],
             symbols: vec![],
+            symbol_references: vec![],
             edges: vec![],
             stats: IndexStats {
                 file_count: 0,
                 role_counts: BTreeMap::new(),
                 symbol_count: 0,
                 symbol_kind_counts: BTreeMap::new(),
+                symbol_reference_count: 0,
                 connection_count: 0,
             },
         };

@@ -126,10 +126,57 @@ pub struct SymbolReport {
     pub next_actions: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RelatedMode {
+    File,
+    Symbol,
+}
+
+impl std::fmt::Display for RelatedMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            RelatedMode::File => "file",
+            RelatedMode::Symbol => "symbol",
+        };
+        write!(f, "{value}")
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RelatedFile {
+    pub path: String,
+    pub role: String,
+    pub score: f64,
+    pub confidence: Confidence,
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RelatedReport {
+    pub query: String,
+    pub mode: RelatedMode,
+    pub index_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_mode: Option<SymbolMatchMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_role: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub symbol_matches: Vec<SymbolMatch>,
+    pub related_files: Vec<RelatedFile>,
+    pub edges: Vec<MapEdge>,
+    pub symbols: Vec<IndexedSymbol>,
+    pub references: Vec<crate::index::IndexedSymbolReference>,
+    pub next_actions: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SymbolMatch {
     pub symbol: IndexedSymbol,
     pub file_role: String,
+    pub used_by: Vec<crate::index::IndexedSymbolReference>,
     pub outgoing_edges: Vec<MapEdge>,
     pub incoming_edges: Vec<MapEdge>,
     pub next_actions: Vec<String>,

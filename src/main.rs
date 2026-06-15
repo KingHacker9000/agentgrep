@@ -3,6 +3,7 @@ mod index;
 mod map;
 mod output;
 mod rank;
+mod related;
 mod repo;
 mod search;
 mod symbol;
@@ -67,6 +68,11 @@ fn run() -> Result<()> {
             let repo = repo::discover()?;
             let report = symbol::build_report(&repo, &name)?;
             symbol::write_report(&report, json)?;
+        }
+        cli::Commands::Related { query, json } => {
+            let repo = repo::discover()?;
+            let report = related::build_report(&repo, &query)?;
+            related::write_report(&report, json)?;
         }
     }
 

@@ -42,4 +42,12 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Show related files, symbols, and references.
+    Related {
+        /// File path or symbol query to analyze.
+        query: String,
+        /// Emit stable JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
 }

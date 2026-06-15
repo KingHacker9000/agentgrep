@@ -335,7 +335,7 @@ pub(crate) fn build_next_actions(
     actions
 }
 
-fn resolve_requested_path(repo_root: &Path, input: &str) -> String {
+pub(crate) fn resolve_requested_path(repo_root: &Path, input: &str) -> String {
     let requested = Path::new(input);
     let absolute = if requested.is_absolute() {
         requested.to_path_buf()
@@ -398,6 +398,7 @@ mod tests {
                     content_hash: Some("deadbeef".to_string()),
                 }],
                 symbols: vec![],
+                symbol_references: vec![],
                 edges: vec![crate::index::IndexedEdge {
                     edge_type: "same_area".to_string(),
                     from: "src/search.rs".to_string(),
@@ -410,6 +411,7 @@ mod tests {
                     role_counts: BTreeMap::from([(FileRole::Source, 1)]),
                     symbol_count: 0,
                     symbol_kind_counts: BTreeMap::new(),
+                    symbol_reference_count: 0,
                     connection_count: 1,
                 },
             }),
@@ -464,6 +466,7 @@ mod tests {
                     content_hash: Some("deadbeef".to_string()),
                 }],
                 symbols: vec![],
+                symbol_references: vec![],
                 edges: vec![
                     crate::index::IndexedEdge {
                         edge_type: "same_area".to_string(),
@@ -485,6 +488,7 @@ mod tests {
                     role_counts: BTreeMap::from([(FileRole::Source, 1)]),
                     symbol_count: 0,
                     symbol_kind_counts: BTreeMap::new(),
+                    symbol_reference_count: 0,
                     connection_count: 2,
                 },
             }),
@@ -508,7 +512,7 @@ mod tests {
             index_path: PathBuf::from("C:/repo/.agentgrep/index.json"),
             state: IndexState::Fresh,
             index: Some(RepoIndex {
-                schema_version: 2,
+                schema_version: INDEX_SCHEMA_VERSION,
                 repo_root: "C:/repo".to_string(),
                 repo_rev: Some("abc".to_string()),
                 indexed_at_unix: 1,
@@ -527,12 +531,14 @@ mod tests {
                     visibility: crate::types::Visibility::Public,
                     signature: Some("pub fn run()".to_string()),
                 }],
+                symbol_references: vec![],
                 edges: vec![],
                 stats: IndexStats {
                     file_count: 1,
                     role_counts: BTreeMap::from([(FileRole::Source, 1)]),
                     symbol_count: 1,
                     symbol_kind_counts: BTreeMap::from([(crate::types::SymbolKind::Function, 1)]),
+                    symbol_reference_count: 0,
                     connection_count: 0,
                 },
             }),
