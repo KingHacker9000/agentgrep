@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize)]
@@ -110,6 +110,7 @@ pub struct MapReport {
     pub size_bytes: Option<u64>,
     pub modified_unix: Option<u64>,
     pub content_hash: Option<String>,
+    pub symbols: Vec<IndexedSymbol>,
     pub outgoing_edges: Vec<MapEdge>,
     pub incoming_edges: Vec<MapEdge>,
     pub connection_counts: ConnectionCounts,
@@ -131,6 +132,66 @@ pub struct ConnectionCounts {
     pub incoming_total: usize,
     pub outgoing_by_type: BTreeMap<String, usize>,
     pub incoming_by_type: BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum SymbolKind {
+    Function,
+    Struct,
+    Enum,
+    Trait,
+    Impl,
+    TypeAlias,
+    Const,
+    Static,
+    Module,
+    Unknown,
+}
+
+impl std::fmt::Display for SymbolKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            SymbolKind::Function => "function",
+            SymbolKind::Struct => "struct",
+            SymbolKind::Enum => "enum",
+            SymbolKind::Trait => "trait",
+            SymbolKind::Impl => "impl",
+            SymbolKind::TypeAlias => "type_alias",
+            SymbolKind::Const => "const",
+            SymbolKind::Static => "static",
+            SymbolKind::Module => "module",
+            SymbolKind::Unknown => "unknown",
+        };
+        write!(f, "{value}")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum Visibility {
+    Public,
+    Private,
+}
+
+impl std::fmt::Display for Visibility {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Visibility::Public => "public",
+            Visibility::Private => "private",
+        };
+        write!(f, "{value}")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexedSymbol {
+    pub name: String,
+    pub kind: SymbolKind,
+    pub file_path: String,
+    pub line_number: usize,
+    pub visibility: Visibility,
+    pub signature: Option<String>,
 }
 
 #[derive(Debug, Clone)]

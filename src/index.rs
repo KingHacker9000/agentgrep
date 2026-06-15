@@ -12,8 +12,10 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::repo::{display_path, RepoInfo};
+use crate::text::shorten_snippet;
+use crate::types::{IndexedSymbol, SymbolKind, Visibility};
 
-pub const INDEX_SCHEMA_VERSION: u32 = 1;
+pub const INDEX_SCHEMA_VERSION: u32 = 3;
 pub const HASH_LIMIT_BYTES: u64 = 1024 * 256;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +25,8 @@ pub struct RepoIndex {
     pub repo_rev: Option<String>,
     pub indexed_at_unix: u64,
     pub files: Vec<IndexedFile>,
+    #[serde(default)]
+    pub symbols: Vec<IndexedSymbol>,
     pub edges: Vec<IndexedEdge>,
     pub stats: IndexStats,
 }
@@ -49,6 +53,10 @@ pub struct IndexedEdge {
 pub struct IndexStats {
     pub file_count: usize,
     pub role_counts: BTreeMap<FileRole, usize>,
+    #[serde(default)]
+    pub symbol_count: usize,
+    #[serde(default)]
+    pub symbol_kind_counts: BTreeMap<SymbolKind, usize>,
     pub connection_count: usize,
 }
 
@@ -104,6 +112,8 @@ pub struct IndexBuildReport {
     pub repo_rev: Option<String>,
     pub file_count: usize,
     pub role_counts: BTreeMap<FileRole, usize>,
+    pub symbol_count: usize,
+    pub symbol_kind_counts: BTreeMap<SymbolKind, usize>,
     pub connection_count: usize,
 }
 
@@ -113,6 +123,8 @@ pub struct IndexStatusReport {
     pub state: IndexState,
     pub file_count: usize,
     pub role_counts: BTreeMap<FileRole, usize>,
+    pub symbol_count: usize,
+    pub symbol_kind_counts: BTreeMap<SymbolKind, usize>,
     pub connection_count: usize,
     pub repo_rev: Option<String>,
     pub indexed_rev: Option<String>,
@@ -169,6 +181,8 @@ pub fn build(repo: &RepoInfo) -> Result<IndexBuildReport> {
         repo_rev: index.repo_rev.clone(),
         file_count: index.stats.file_count,
         role_counts: index.stats.role_counts.clone(),
+        symbol_count: index.stats.symbol_count,
+        symbol_kind_counts: index.stats.symbol_kind_counts.clone(),
         connection_count: index.stats.connection_count,
     })
 }
@@ -182,6 +196,8 @@ pub fn status(repo: &RepoInfo) -> Result<IndexStatusReport> {
             state: loaded.state,
             file_count: index.stats.file_count,
             role_counts: index.stats.role_counts,
+            symbol_count: index.stats.symbol_count,
+            symbol_kind_counts: index.stats.symbol_kind_counts,
             connection_count: index.stats.connection_count,
             repo_rev: repo.rev.clone(),
             indexed_rev: index.repo_rev,
@@ -192,6 +208,8 @@ pub fn status(repo: &RepoInfo) -> Result<IndexStatusReport> {
             state: loaded.state,
             file_count: 0,
             role_counts: BTreeMap::new(),
+            symbol_count: 0,
+            symbol_kind_counts: BTreeMap::new(),
             connection_count: 0,
             repo_rev: repo.rev.clone(),
             indexed_rev: None,
@@ -243,6 +261,11 @@ pub fn write_build_report(report: &IndexBuildReport) -> Result<()> {
         "- roles counted: {}",
         format_role_counts(&report.role_counts)
     );
+    println!("- symbols indexed: {}", report.symbol_count);
+    println!(
+        "- symbol kinds: {}",
+        format_symbol_kind_counts(&report.symbol_kind_counts)
+    );
     println!("- connections counted: {}", report.connection_count);
     println!("- index path: {}", display_path(&report.index_path));
     println!(
@@ -259,6 +282,11 @@ pub fn write_status_report(report: &IndexStatusReport) -> Result<()> {
     println!(
         "- roles counted: {}",
         format_role_counts(&report.role_counts)
+    );
+    println!("- symbols indexed: {}", report.symbol_count);
+    println!(
+        "- symbol kinds: {}",
+        format_symbol_kind_counts(&report.symbol_kind_counts)
     );
     println!("- connections counted: {}", report.connection_count);
     if let Some(repo_rev) = &report.repo_rev {
@@ -385,6 +413,7 @@ fn build_index(repo: &RepoInfo) -> Result<RepoIndex> {
         .map(|file| file.path.clone())
         .collect();
 
+    let symbols = build_rust_symbols(&files, &source_texts);
     let mut edges = Vec::new();
     edges.extend(build_rust_edges(&files, &source_texts));
     edges.extend(build_same_area_edges(&files));
@@ -393,6 +422,8 @@ fn build_index(repo: &RepoInfo) -> Result<RepoIndex> {
 
     let file_count = files.len();
     let role_counts = count_roles(&files);
+    let symbol_count = symbols.len();
+    let symbol_kind_counts = count_symbol_kinds(&symbols);
     let indexed_at_unix = unix_now();
 
     Ok(RepoIndex {
@@ -401,10 +432,13 @@ fn build_index(repo: &RepoInfo) -> Result<RepoIndex> {
         repo_rev: repo.rev.clone(),
         indexed_at_unix,
         files,
+        symbols,
         edges: edges.clone(),
         stats: IndexStats {
             file_count,
             role_counts,
+            symbol_count,
+            symbol_kind_counts,
             connection_count: edges.len(),
         },
     })
@@ -479,6 +513,353 @@ fn build_config_edges(files: &[IndexedFile], source_paths: &[String]) -> Vec<Ind
     }
 
     edges
+}
+
+fn build_rust_symbols(
+    files: &[IndexedFile],
+    source_texts: &BTreeMap<String, String>,
+) -> Vec<IndexedSymbol> {
+    let mut symbols = Vec::new();
+
+    for file in files
+        .iter()
+        .filter(|file| matches!(file.role, FileRole::Source) && file.path.ends_with(".rs"))
+    {
+        let Some(text) = source_texts.get(&file.path) else {
+            continue;
+        };
+
+        for (line_index, line) in text.lines().enumerate() {
+            if let Some(symbol) = rust_symbol_from_line(&file.path, line_index + 1, line) {
+                symbols.push(symbol);
+            }
+        }
+    }
+
+    symbols
+}
+
+fn count_symbol_kinds(symbols: &[IndexedSymbol]) -> BTreeMap<SymbolKind, usize> {
+    let mut counts = BTreeMap::new();
+    for symbol in symbols {
+        *counts.entry(symbol.kind.clone()).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn rust_symbol_from_line(file_path: &str, line_number: usize, line: &str) -> Option<IndexedSymbol> {
+    let stripped = strip_line_comment(line).trim();
+    if stripped.is_empty() {
+        return None;
+    }
+
+    let signature = Some(shorten_snippet(stripped, 120));
+    let (visibility, remainder) = rust_visibility_prefix(stripped);
+    let remainder = strip_rust_item_prefixes(remainder);
+
+    if let Some(name) = parse_rust_module_symbol(remainder) {
+        return Some(symbol_record(
+            file_path,
+            line_number,
+            name,
+            SymbolKind::Module,
+            visibility,
+            signature,
+        ));
+    }
+    if let Some(name) = parse_rust_function_symbol(remainder) {
+        return Some(symbol_record(
+            file_path,
+            line_number,
+            name,
+            SymbolKind::Function,
+            visibility,
+            signature,
+        ));
+    }
+    if let Some(name) = parse_rust_struct_symbol(remainder) {
+        return Some(symbol_record(
+            file_path,
+            line_number,
+            name,
+            SymbolKind::Struct,
+            visibility,
+            signature,
+        ));
+    }
+    if let Some(name) = parse_rust_enum_symbol(remainder) {
+        return Some(symbol_record(
+            file_path,
+            line_number,
+            name,
+            SymbolKind::Enum,
+            visibility,
+            signature,
+        ));
+    }
+    if let Some(name) = parse_rust_trait_symbol(remainder) {
+        return Some(symbol_record(
+            file_path,
+            line_number,
+            name,
+            SymbolKind::Trait,
+            visibility,
+            signature,
+        ));
+    }
+    if let Some(name) = parse_rust_impl_symbol(remainder) {
+        return Some(symbol_record(
+            file_path,
+            line_number,
+            name,
+            SymbolKind::Impl,
+            Visibility::Private,
+            signature,
+        ));
+    }
+    if let Some(name) = parse_rust_type_alias_symbol(remainder) {
+        return Some(symbol_record(
+            file_path,
+            line_number,
+            name,
+            SymbolKind::TypeAlias,
+            visibility,
+            signature,
+        ));
+    }
+    if let Some(name) = parse_rust_const_symbol(remainder) {
+        return Some(symbol_record(
+            file_path,
+            line_number,
+            name,
+            SymbolKind::Const,
+            visibility,
+            signature,
+        ));
+    }
+    if let Some(name) = parse_rust_static_symbol(remainder) {
+        return Some(symbol_record(
+            file_path,
+            line_number,
+            name,
+            SymbolKind::Static,
+            visibility,
+            signature,
+        ));
+    }
+
+    None
+}
+
+fn symbol_record(
+    file_path: &str,
+    line_number: usize,
+    name: String,
+    kind: SymbolKind,
+    visibility: Visibility,
+    signature: Option<String>,
+) -> IndexedSymbol {
+    IndexedSymbol {
+        name,
+        kind,
+        file_path: file_path.to_string(),
+        line_number,
+        visibility,
+        signature,
+    }
+}
+
+fn rust_visibility_prefix(line: &str) -> (Visibility, &str) {
+    let trimmed = line.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("pub(crate)") {
+        return (Visibility::Public, rest.trim_start());
+    }
+    if let Some(rest) = trimmed.strip_prefix("pub(super)") {
+        return (Visibility::Public, rest.trim_start());
+    }
+    if let Some(rest) = trimmed.strip_prefix("pub(in ") {
+        if let Some(close) = rest.find(')') {
+            return (Visibility::Public, rest[close + 1..].trim_start());
+        }
+    }
+    if let Some(rest) = trimmed.strip_prefix("pub ") {
+        return (Visibility::Public, rest.trim_start());
+    }
+    (Visibility::Private, trimmed)
+}
+
+fn strip_rust_item_prefixes(line: &str) -> &str {
+    let mut current = line.trim_start();
+    loop {
+        if let Some(rest) = current.strip_prefix("async ") {
+            current = rest.trim_start();
+            continue;
+        }
+        if let Some(rest) = current.strip_prefix("unsafe ") {
+            current = rest.trim_start();
+            continue;
+        }
+        if let Some(rest) = current.strip_prefix("default ") {
+            current = rest.trim_start();
+            continue;
+        }
+        break;
+    }
+    current
+}
+
+fn parse_rust_module_symbol(line: &str) -> Option<String> {
+    let remainder = line.strip_prefix("mod ")?;
+    let name = remainder.trim().strip_suffix(';')?.trim();
+    if is_rust_identifier(name) {
+        Some(name.to_string())
+    } else {
+        None
+    }
+}
+
+fn parse_rust_function_symbol(line: &str) -> Option<String> {
+    let remainder = line.strip_prefix("fn ")?;
+    parse_rust_identifier_name(remainder)
+}
+
+fn parse_rust_struct_symbol(line: &str) -> Option<String> {
+    let remainder = line.strip_prefix("struct ")?;
+    parse_rust_identifier_name(remainder)
+}
+
+fn parse_rust_enum_symbol(line: &str) -> Option<String> {
+    let remainder = line.strip_prefix("enum ")?;
+    parse_rust_identifier_name(remainder)
+}
+
+fn parse_rust_trait_symbol(line: &str) -> Option<String> {
+    let remainder = line.strip_prefix("trait ")?;
+    parse_rust_identifier_name(remainder)
+}
+
+fn parse_rust_type_alias_symbol(line: &str) -> Option<String> {
+    let remainder = line.strip_prefix("type ")?;
+    parse_rust_identifier_name(remainder)
+}
+
+fn parse_rust_const_symbol(line: &str) -> Option<String> {
+    let remainder = line.strip_prefix("const ")?;
+    if remainder.trim_start().starts_with("fn ") {
+        return None;
+    }
+    parse_rust_const_like_name(remainder)
+}
+
+fn parse_rust_static_symbol(line: &str) -> Option<String> {
+    let remainder = line.strip_prefix("static ")?;
+    let remainder = remainder.strip_prefix("mut ").unwrap_or(remainder);
+    parse_rust_const_like_name(remainder)
+}
+
+fn parse_rust_impl_symbol(line: &str) -> Option<String> {
+    let remainder = line.strip_prefix("impl ")?;
+    parse_rust_impl_name(remainder)
+}
+
+fn parse_rust_identifier_name(text: &str) -> Option<String> {
+    let trimmed = text.trim_start();
+    let (name, _) = read_rust_identifier(trimmed)?;
+    Some(name)
+}
+
+fn parse_rust_const_like_name(text: &str) -> Option<String> {
+    let trimmed = text.trim_start();
+    let (name, _) = read_rust_identifier(trimmed)?;
+    Some(name)
+}
+
+fn parse_rust_impl_name(text: &str) -> Option<String> {
+    let mut body = text.trim_start();
+    if body.starts_with('<') {
+        body = skip_rust_angle_brackets(body);
+    }
+    let body = body
+        .split_once(" where ")
+        .map(|(head, _)| head)
+        .unwrap_or(body)
+        .split_once('{')
+        .map(|(head, _)| head)
+        .unwrap_or(body)
+        .trim();
+    if body.is_empty() {
+        return Some("impl".to_string());
+    }
+
+    if let Some((trait_part, type_part)) = body.split_once(" for ") {
+        let trait_name = simplify_rust_symbol_name(trait_part);
+        let type_name = simplify_rust_symbol_name(type_part);
+        if !trait_name.is_empty() && !type_name.is_empty() {
+            return Some(format!("{trait_name} for {type_name}"));
+        }
+    }
+
+    let name = simplify_rust_symbol_name(body);
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+fn skip_rust_angle_brackets(text: &str) -> &str {
+    let mut depth = 0usize;
+    for (idx, ch) in text.char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return text[idx + ch.len_utf8()..].trim_start();
+                }
+            }
+            _ => {}
+        }
+    }
+    text
+}
+
+fn simplify_rust_symbol_name(text: &str) -> String {
+    let trimmed = text.trim();
+    let trimmed = trimmed
+        .split_once('<')
+        .map(|(head, _)| head)
+        .unwrap_or(trimmed);
+    let trimmed = trimmed
+        .split_once(" where ")
+        .map(|(head, _)| head)
+        .unwrap_or(trimmed);
+    let trimmed = trimmed.trim_end_matches('{').trim_end_matches(';').trim();
+    trimmed
+        .split_whitespace()
+        .next()
+        .unwrap_or(trimmed)
+        .trim_end_matches(',')
+        .to_string()
+}
+
+fn read_rust_identifier(text: &str) -> Option<(String, &str)> {
+    let mut chars = text.char_indices();
+    let (_, first) = chars.next()?;
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return None;
+    }
+
+    let mut end = first.len_utf8();
+    for (idx, ch) in chars {
+        if ch == '_' || ch.is_ascii_alphanumeric() {
+            end = idx + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+
+    Some((text[..end].to_string(), &text[end..]))
 }
 
 fn build_rust_edges(
@@ -1151,9 +1532,23 @@ fn remove_empty_parent(path: &Path) -> Result<()> {
 }
 
 fn format_role_counts(counts: &BTreeMap<FileRole, usize>) -> String {
+    if counts.is_empty() {
+        return "none".to_string();
+    }
     counts
         .iter()
         .map(|(role, count)| format!("{role}:{count}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_symbol_kind_counts(counts: &BTreeMap<SymbolKind, usize>) -> String {
+    if counts.is_empty() {
+        return "none".to_string();
+    }
+    counts
+        .iter()
+        .map(|(kind, count)| format!("{kind}:{count}"))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -1374,6 +1769,80 @@ mod tests {
     }
 
     #[test]
+    fn extracts_rust_functions() {
+        let files = vec![source_file("src/search.rs")];
+        let texts = source_texts(&[("src/search.rs", "pub async fn run() {}\nfn helper() {}\n")]);
+
+        let symbols = build_rust_symbols(&files, &texts);
+        assert!(symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Function
+                && symbol.name == "run"
+                && symbol.visibility == Visibility::Public
+        }));
+        assert!(symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Function
+                && symbol.name == "helper"
+                && symbol.visibility == Visibility::Private
+        }));
+    }
+
+    #[test]
+    fn extracts_structs_and_enums() {
+        let files = vec![source_file("src/types.rs")];
+        let texts = source_texts(&[("src/types.rs", "pub struct SearchMatch {}\nenum Mode {}\n")]);
+
+        let symbols = build_rust_symbols(&files, &texts);
+        assert!(symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Struct
+                && symbol.name == "SearchMatch"
+                && symbol.visibility == Visibility::Public
+        }));
+        assert!(symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Enum
+                && symbol.name == "Mode"
+                && symbol.visibility == Visibility::Private
+        }));
+    }
+
+    #[test]
+    fn extracts_impl_blocks() {
+        let files = vec![source_file("src/search.rs")];
+        let texts = source_texts(&[(
+            "src/search.rs",
+            "impl SearchReport {}\nimpl Display for SearchReport {}\n",
+        )]);
+
+        let symbols = build_rust_symbols(&files, &texts);
+        assert!(symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Impl
+                && symbol.name.contains("SearchReport")
+                && symbol
+                    .signature
+                    .as_deref()
+                    .unwrap_or_default()
+                    .starts_with("impl")
+        }));
+    }
+
+    #[test]
+    fn extracts_modules() {
+        let files = vec![source_file("src/main.rs"), source_file("src/search.rs")];
+        let texts = source_texts(&[("src/main.rs", "mod search;\npub mod types;\n")]);
+
+        let symbols = build_rust_symbols(&files, &texts);
+        assert!(symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Module
+                && symbol.name == "search"
+                && symbol.visibility == Visibility::Private
+        }));
+        assert!(symbols.iter().any(|symbol| {
+            symbol.kind == SymbolKind::Module
+                && symbol.name == "types"
+                && symbol.visibility == Visibility::Public
+        }));
+    }
+
+    #[test]
     fn detects_rust_module_declarations() {
         let files = vec![source_file("src/main.rs"), source_file("src/search.rs")];
         let texts = source_texts(&[("src/main.rs", "mod search;")]);
@@ -1440,10 +1909,13 @@ mod tests {
             repo_rev: Some("abc".to_string()),
             indexed_at_unix: 1,
             files: vec![],
+            symbols: vec![],
             edges: vec![],
             stats: IndexStats {
                 file_count: 0,
                 role_counts: BTreeMap::new(),
+                symbol_count: 0,
+                symbol_kind_counts: BTreeMap::new(),
                 connection_count: 0,
             },
         };
@@ -1481,6 +1953,14 @@ mod tests {
                 modified_unix: Some(456),
                 content_hash: Some("deadbeef".to_string()),
             }],
+            symbols: vec![IndexedSymbol {
+                name: "main".to_string(),
+                kind: SymbolKind::Function,
+                file_path: "src/main.rs".to_string(),
+                line_number: 1,
+                visibility: Visibility::Public,
+                signature: Some("pub fn main()".to_string()),
+            }],
             edges: vec![IndexedEdge {
                 edge_type: "same_area".to_string(),
                 from: "src/main.rs".to_string(),
@@ -1491,14 +1971,18 @@ mod tests {
             stats: IndexStats {
                 file_count: 1,
                 role_counts: BTreeMap::from([(FileRole::Source, 1)]),
+                symbol_count: 1,
+                symbol_kind_counts: BTreeMap::from([(SymbolKind::Function, 1)]),
                 connection_count: 1,
             },
         };
         let json = serde_json::to_value(&index).unwrap();
-        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["schema_version"], INDEX_SCHEMA_VERSION);
         assert_eq!(json["files"].as_array().unwrap().len(), 1);
+        assert_eq!(json["symbols"].as_array().unwrap().len(), 1);
         assert_eq!(json["edges"].as_array().unwrap().len(), 1);
         assert_eq!(json["stats"]["connection_count"], 1);
+        assert_eq!(json["stats"]["symbol_count"], 1);
     }
 
     #[test]
@@ -1518,10 +2002,13 @@ mod tests {
             repo_rev: Some("abc".to_string()),
             indexed_at_unix: 1,
             files: vec![],
+            symbols: vec![],
             edges: vec![],
             stats: IndexStats {
                 file_count: 0,
                 role_counts: BTreeMap::new(),
+                symbol_count: 0,
+                symbol_kind_counts: BTreeMap::new(),
                 connection_count: 0,
             },
         };

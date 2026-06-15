@@ -4,9 +4,11 @@ use std::path::Path;
 
 use crate::index::{self, IndexedEdge, IndexedFile};
 use crate::repo::{display_path, RepoInfo};
-use crate::types::{ConnectionCounts, MapEdge, MapReport};
+use crate::text::shorten_snippet;
+use crate::types::{ConnectionCounts, IndexedSymbol, MapEdge, MapReport};
 
 const MAP_EDGE_DISPLAY_LIMIT: usize = 5;
+const MAP_SYMBOL_DISPLAY_LIMIT: usize = 5;
 const EDGE_TYPE_PRIORITY: [&str; 6] = [
     "declares_module",
     "imports",
@@ -48,6 +50,13 @@ pub fn build_report(repo: &RepoInfo, input_path: &str) -> Result<MapReport> {
 
     let outgoing_display = ordered_edges(&outgoing_all);
     let incoming_display = ordered_edges(&incoming_all);
+    let symbols = ordered_symbols(
+        index
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.file_path == resolved_path)
+            .collect::<Vec<_>>(),
+    );
 
     let connection_counts = ConnectionCounts {
         outgoing_total: outgoing_all.len(),
@@ -65,6 +74,7 @@ pub fn build_report(repo: &RepoInfo, input_path: &str) -> Result<MapReport> {
         size_bytes: file.size_bytes,
         modified_unix: file.modified_unix,
         content_hash: file.content_hash.clone(),
+        symbols: render_symbols(&symbols),
         outgoing_edges: render_edges(&outgoing_display),
         incoming_edges: render_edges(&incoming_display),
         connection_counts,
@@ -87,6 +97,7 @@ fn build_missing_report(
         size_bytes: None,
         modified_unix: None,
         content_hash: None,
+        symbols: Vec::new(),
         outgoing_edges: Vec::new(),
         incoming_edges: Vec::new(),
         connection_counts: ConnectionCounts {
@@ -126,6 +137,13 @@ pub fn write_report(report: &MapReport, json: bool) -> Result<()> {
         println!("- repo rev: {}", repo_rev);
     }
     println!("- index path: {}", report.index_path);
+
+    if report.symbols.is_empty() {
+        println!("Symbols: none indexed");
+    } else {
+        println!("Symbols ({} total):", report.symbols.len());
+        render_symbol_section(&report.symbols);
+    }
 
     println!(
         "Outgoing ({} total):",
@@ -192,6 +210,27 @@ fn render_edge_section(edges: &[MapEdge], counts: &BTreeMap<String, usize>) {
     }
 }
 
+fn render_symbol_section(symbols: &[IndexedSymbol]) {
+    for symbol in symbols.iter().take(MAP_SYMBOL_DISPLAY_LIMIT) {
+        let mut details = format!(
+            "{} [{} {}] line {}",
+            symbol.name, symbol.kind, symbol.visibility, symbol.line_number
+        );
+        if let Some(signature) = &symbol.signature {
+            details.push_str(": ");
+            details.push_str(signature);
+        }
+        println!("- {details}");
+    }
+    if symbols.len() > MAP_SYMBOL_DISPLAY_LIMIT {
+        println!(
+            "- ... showing {} of {}",
+            MAP_SYMBOL_DISPLAY_LIMIT,
+            symbols.len()
+        );
+    }
+}
+
 fn ordered_edges<'a>(edges: &'a [&'a IndexedEdge]) -> Vec<&'a IndexedEdge> {
     let mut ordered = edges.to_vec();
     ordered.sort_by(|left, right| {
@@ -201,6 +240,17 @@ fn ordered_edges<'a>(edges: &'a [&'a IndexedEdge]) -> Vec<&'a IndexedEdge> {
             .then_with(|| left.from.cmp(&right.from))
             .then_with(|| left.to.cmp(&right.to))
             .then_with(|| left.reason.cmp(&right.reason))
+    });
+    ordered
+}
+
+fn ordered_symbols<'a>(symbols: Vec<&'a IndexedSymbol>) -> Vec<&'a IndexedSymbol> {
+    let mut ordered = symbols;
+    ordered.sort_by(|left, right| {
+        left.line_number
+            .cmp(&right.line_number)
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.kind.cmp(&right.kind))
     });
     ordered
 }
@@ -233,6 +283,23 @@ fn render_edges(edges: &[&IndexedEdge]) -> Vec<MapEdge> {
             to: edge.to.clone(),
             confidence: edge.confidence.to_string(),
             reason: edge.reason.clone(),
+        })
+        .collect()
+}
+
+fn render_symbols(symbols: &[&IndexedSymbol]) -> Vec<IndexedSymbol> {
+    symbols
+        .iter()
+        .map(|symbol| IndexedSymbol {
+            name: symbol.name.clone(),
+            kind: symbol.kind.clone(),
+            file_path: symbol.file_path.clone(),
+            line_number: symbol.line_number,
+            visibility: symbol.visibility.clone(),
+            signature: symbol
+                .signature
+                .as_ref()
+                .map(|signature| shorten_snippet(signature, 120)),
         })
         .collect()
 }
@@ -289,7 +356,10 @@ fn file_stem_like(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::{EdgeConfidence, FileRole, IndexState, IndexStats, IndexedFile, RepoIndex};
+    use crate::index::{
+        EdgeConfidence, FileRole, IndexState, IndexStats, IndexedFile, RepoIndex,
+        INDEX_SCHEMA_VERSION,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -312,7 +382,7 @@ mod tests {
             index_path: PathBuf::from("C:/repo/.agentgrep/index.json"),
             state: IndexState::Fresh,
             index: Some(RepoIndex {
-                schema_version: 1,
+                schema_version: INDEX_SCHEMA_VERSION,
                 repo_root: "C:/repo".to_string(),
                 repo_rev: Some("abc".to_string()),
                 indexed_at_unix: 1,
@@ -323,6 +393,7 @@ mod tests {
                     modified_unix: Some(20),
                     content_hash: Some("deadbeef".to_string()),
                 }],
+                symbols: vec![],
                 edges: vec![crate::index::IndexedEdge {
                     edge_type: "same_area".to_string(),
                     from: "src/search.rs".to_string(),
@@ -333,6 +404,8 @@ mod tests {
                 stats: IndexStats {
                     file_count: 1,
                     role_counts: BTreeMap::from([(FileRole::Source, 1)]),
+                    symbol_count: 0,
+                    symbol_kind_counts: BTreeMap::new(),
                     connection_count: 1,
                 },
             }),
@@ -375,7 +448,7 @@ mod tests {
             index_path: PathBuf::from("C:/repo/.agentgrep/index.json"),
             state: IndexState::Fresh,
             index: Some(RepoIndex {
-                schema_version: 1,
+                schema_version: INDEX_SCHEMA_VERSION,
                 repo_root: "C:/repo".to_string(),
                 repo_rev: Some("abc".to_string()),
                 indexed_at_unix: 1,
@@ -386,6 +459,7 @@ mod tests {
                     modified_unix: Some(20),
                     content_hash: Some("deadbeef".to_string()),
                 }],
+                symbols: vec![],
                 edges: vec![
                     crate::index::IndexedEdge {
                         edge_type: "same_area".to_string(),
@@ -405,6 +479,8 @@ mod tests {
                 stats: IndexStats {
                     file_count: 1,
                     role_counts: BTreeMap::from([(FileRole::Source, 1)]),
+                    symbol_count: 0,
+                    symbol_kind_counts: BTreeMap::new(),
                     connection_count: 2,
                 },
             }),
@@ -415,6 +491,55 @@ mod tests {
             report.connection_counts.outgoing_by_type.get("imports"),
             Some(&1)
         );
+    }
+
+    #[test]
+    fn map_report_includes_symbols_and_json() {
+        let repo = RepoInfo {
+            root: PathBuf::from("C:/repo"),
+            rev: Some("abc".to_string()),
+            git_dir: None,
+        };
+        let loaded = index::LoadedIndex {
+            index_path: PathBuf::from("C:/repo/.agentgrep/index.json"),
+            state: IndexState::Fresh,
+            index: Some(RepoIndex {
+                schema_version: 2,
+                repo_root: "C:/repo".to_string(),
+                repo_rev: Some("abc".to_string()),
+                indexed_at_unix: 1,
+                files: vec![IndexedFile {
+                    path: "src/search.rs".to_string(),
+                    role: FileRole::Source,
+                    size_bytes: Some(10),
+                    modified_unix: Some(20),
+                    content_hash: Some("deadbeef".to_string()),
+                }],
+                symbols: vec![crate::types::IndexedSymbol {
+                    name: "run".to_string(),
+                    kind: crate::types::SymbolKind::Function,
+                    file_path: "src/search.rs".to_string(),
+                    line_number: 12,
+                    visibility: crate::types::Visibility::Public,
+                    signature: Some("pub fn run()".to_string()),
+                }],
+                edges: vec![],
+                stats: IndexStats {
+                    file_count: 1,
+                    role_counts: BTreeMap::from([(FileRole::Source, 1)]),
+                    symbol_count: 1,
+                    symbol_kind_counts: BTreeMap::from([(crate::types::SymbolKind::Function, 1)]),
+                    connection_count: 0,
+                },
+            }),
+        };
+        let report = build_report_from_loaded(&repo, &loaded, "src/search.rs").unwrap();
+        assert_eq!(report.symbols.len(), 1);
+        assert_eq!(report.symbols[0].name, "run");
+
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["symbols"].as_array().unwrap().len(), 1);
+        assert_eq!(json["symbols"][0]["name"], "run");
     }
 
     fn build_report_from_loaded(
@@ -439,6 +564,11 @@ mod tests {
             .iter()
             .filter(|edge| edge.to == resolved_path)
             .collect();
+        let symbols: Vec<&crate::types::IndexedSymbol> = index
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.file_path == resolved_path)
+            .collect();
         Ok(MapReport {
             path: resolved_path,
             role: file.role.to_string(),
@@ -448,6 +578,7 @@ mod tests {
             size_bytes: file.size_bytes,
             modified_unix: file.modified_unix,
             content_hash: file.content_hash.clone(),
+            symbols: render_symbols(&ordered_symbols(symbols)),
             outgoing_edges: render_edges(&ordered_edges(&outgoing_all)),
             incoming_edges: render_edges(&ordered_edges(&incoming_all)),
             connection_counts: ConnectionCounts {
