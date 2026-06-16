@@ -192,7 +192,11 @@ fn render_used_by(references: &[IndexedSymbolReference]) {
     }
     println!("):");
 
-    for reference in references.iter().take(SYMBOL_REFERENCE_DISPLAY_LIMIT) {
+    let display_references = summarize_used_by_display(references);
+    for reference in display_references
+        .iter()
+        .take(SYMBOL_REFERENCE_DISPLAY_LIMIT)
+    {
         let extra = reference.additional_count;
         let mut details = format!(
             "{}:{} [{} / {}] {}",
@@ -215,11 +219,11 @@ fn render_used_by(references: &[IndexedSymbolReference]) {
         }
         println!("  - {details}");
     }
-    if references.len() > SYMBOL_REFERENCE_DISPLAY_LIMIT {
+    if display_references.len() > SYMBOL_REFERENCE_DISPLAY_LIMIT {
         println!(
             "  - ... showing {} of {}",
             SYMBOL_REFERENCE_DISPLAY_LIMIT,
-            references.len()
+            display_references.len()
         );
     }
 }
@@ -347,6 +351,53 @@ fn collect_used_by(
 
 fn reference_total_count(reference: &IndexedSymbolReference) -> usize {
     reference.additional_count + 1
+}
+
+fn summarize_used_by_display(references: &[IndexedSymbolReference]) -> Vec<IndexedSymbolReference> {
+    let mut grouped: BTreeMap<
+        (String, ReferenceContext, Option<String>),
+        Vec<IndexedSymbolReference>,
+    > = BTreeMap::new();
+
+    for reference in references {
+        let key = (
+            reference.from_file.clone(),
+            reference.context,
+            reference.target_file.clone(),
+        );
+        grouped.entry(key).or_default().push(reference.clone());
+    }
+
+    let mut display = Vec::new();
+    for mut group in grouped.into_values() {
+        group.sort_by(|left, right| {
+            reference_confidence_priority(&left.confidence)
+                .cmp(&reference_confidence_priority(&right.confidence))
+                .then_with(|| left.line_number.cmp(&right.line_number))
+                .then_with(|| left.symbol_name.cmp(&right.symbol_name))
+                .then_with(|| left.reason.cmp(&right.reason))
+        });
+
+        let mut representative = group[0].clone();
+        let total = group.iter().map(reference_total_count).sum::<usize>();
+        representative.additional_count = total.saturating_sub(1);
+        display.push(representative);
+    }
+
+    display.sort_by(|left, right| {
+        reference_context_priority(left.context)
+            .cmp(&reference_context_priority(right.context))
+            .then_with(|| {
+                reference_confidence_priority(&left.confidence)
+                    .cmp(&reference_confidence_priority(&right.confidence))
+            })
+            .then_with(|| left.from_file.cmp(&right.from_file))
+            .then_with(|| left.line_number.cmp(&right.line_number))
+            .then_with(|| left.symbol_name.cmp(&right.symbol_name))
+            .then_with(|| left.reason.cmp(&right.reason))
+    });
+
+    display
 }
 
 fn reference_context_priority(context: ReferenceContext) -> usize {
@@ -763,6 +814,51 @@ mod tests {
             crate::index::ReferenceContext::Fixture
         );
         assert_eq!(references[1].additional_count, 1);
+    }
+
+    #[test]
+    fn summarize_used_by_display_collapses_same_file_context() {
+        let references = vec![
+            crate::index::IndexedSymbolReference {
+                from_file: "src/main.rs".to_string(),
+                symbol_name: "SearchResult".to_string(),
+                target_file: Some("src/search.rs".to_string()),
+                target_line: Some(11),
+                line_number: 24,
+                confidence: EdgeConfidence::Extracted,
+                reason: "use statement reference".to_string(),
+                context: crate::index::ReferenceContext::Production,
+                additional_count: 0,
+            },
+            crate::index::IndexedSymbolReference {
+                from_file: "src/symbol.rs".to_string(),
+                symbol_name: "SearchResult".to_string(),
+                target_file: Some("src/search.rs".to_string()),
+                target_line: Some(11),
+                line_number: 478,
+                confidence: EdgeConfidence::Inferred,
+                reason: "qualified or token reference".to_string(),
+                context: crate::index::ReferenceContext::Fixture,
+                additional_count: 0,
+            },
+            crate::index::IndexedSymbolReference {
+                from_file: "src/symbol.rs".to_string(),
+                symbol_name: "FindReport".to_string(),
+                target_file: Some("src/search.rs".to_string()),
+                target_line: Some(5),
+                line_number: 612,
+                confidence: EdgeConfidence::Inferred,
+                reason: "qualified or token reference".to_string(),
+                context: crate::index::ReferenceContext::Fixture,
+                additional_count: 0,
+            },
+        ];
+
+        let display = summarize_used_by_display(&references);
+        assert_eq!(display.len(), 2);
+        assert_eq!(display[0].from_file, "src/main.rs");
+        assert_eq!(display[1].from_file, "src/symbol.rs");
+        assert_eq!(display[1].additional_count, 1);
     }
 
     #[test]

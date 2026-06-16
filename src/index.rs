@@ -630,7 +630,7 @@ fn build_rust_symbol_references(
         let defined_lines = definition_lines.get(&file.path);
         let mut in_test_section = matches!(file.role, FileRole::Test) || is_test_path(&file.path);
         let mut current_function_context = if in_test_section {
-            ReferenceContext::Test
+            ReferenceContext::Unknown
         } else {
             ReferenceContext::Production
         };
@@ -645,7 +645,7 @@ fn build_rust_symbol_references(
 
             if is_test_section_line(stripped) {
                 in_test_section = true;
-                current_function_context = ReferenceContext::Test;
+                current_function_context = ReferenceContext::Unknown;
                 pending_test_attribute = false;
                 continue;
             }
@@ -704,14 +704,10 @@ fn build_rust_symbol_references(
                     continue;
                 }
 
-                if quoted && !stripped.contains("::") && !stripped.contains(':') {
+                if quoted && !is_strong_test_reference_line(stripped) {
                     continue;
                 }
-                if in_test_section
-                    && !stripped.contains("::")
-                    && !stripped.contains(':')
-                    && !stripped.starts_with("use ")
-                {
+                if in_test_section && !is_strong_test_reference_line(stripped) {
                     continue;
                 }
 
@@ -935,6 +931,10 @@ fn classify_test_reference_line(
         return current_function_context;
     }
 
+    if stripped.starts_with("use ") {
+        return ReferenceContext::Fixture;
+    }
+
     if stripped.contains("assert!")
         || stripped.contains("assert_eq!")
         || stripped.contains("assert_ne!")
@@ -942,6 +942,10 @@ fn classify_test_reference_line(
         || stripped.contains("matches!")
     {
         return ReferenceContext::Test;
+    }
+
+    if stripped.contains(':') && stripped.contains('=') {
+        return ReferenceContext::Fixture;
     }
 
     if stripped.contains("fixture")
@@ -958,6 +962,17 @@ fn classify_test_reference_line(
     }
 
     ReferenceContext::Unknown
+}
+
+fn is_strong_test_reference_line(stripped: &str) -> bool {
+    stripped.starts_with("use ")
+        || stripped.contains("::")
+        || stripped.contains("assert!")
+        || stripped.contains("assert_eq!")
+        || stripped.contains("assert_ne!")
+        || stripped.contains("assert_matches!")
+        || stripped.contains("matches!")
+        || (stripped.contains(':') && stripped.contains('='))
 }
 
 fn classify_test_function_name(name: &str) -> ReferenceContext {
@@ -2453,6 +2468,31 @@ mod tests {
     }
 
     #[test]
+    fn skips_definition_lines_from_reference_extraction() {
+        let files = vec![source_file("src/search.rs"), source_file("src/types.rs")];
+        let texts = source_texts(&[
+            (
+                "src/search.rs",
+                "fn run() {\n    let _ = SearchResult;\n}\n",
+            ),
+            ("src/types.rs", "pub struct SearchResult {}\n"),
+        ]);
+
+        let symbols = vec![IndexedSymbol {
+            name: "SearchResult".to_string(),
+            kind: SymbolKind::Struct,
+            file_path: "src/types.rs".to_string(),
+            line_number: 1,
+            visibility: Visibility::Public,
+            signature: Some("pub struct SearchResult {}".to_string()),
+        }];
+
+        let references = build_rust_symbol_references(&files, &texts, &symbols);
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].line_number, 2);
+    }
+
+    #[test]
     fn detects_search_coverage_references_even_with_impl_block() {
         let files = vec![source_file("src/search.rs"), source_file("src/types.rs")];
         let texts = source_texts(&[(
@@ -2486,11 +2526,16 @@ mod tests {
         assert!(references.iter().any(|reference| {
             reference.symbol_name == "SearchCoverage"
                 && reference.target_file.as_deref() == Some("src/types.rs")
+                && reference.line_number == 1
+                && reference.confidence == EdgeConfidence::Extracted
                 && matches!(reference.context, ReferenceContext::Production)
         }));
         assert!(references.iter().any(|reference| {
             reference.symbol_name == "SearchCoverage"
                 && reference.target_file.as_deref() == Some("src/types.rs")
+                && reference.line_number == 3
+                && reference.confidence == EdgeConfidence::Inferred
+                && reference.additional_count == 1
         }));
     }
 

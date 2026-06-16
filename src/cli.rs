@@ -50,4 +50,12 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Estimate likely impact for a file or symbol.
+    Blast {
+        /// File path or symbol query to analyze.
+        query: String,
+        /// Emit stable JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
 }

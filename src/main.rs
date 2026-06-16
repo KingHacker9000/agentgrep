@@ -1,3 +1,4 @@
+mod blast;
 mod cli;
 mod index;
 mod map;
@@ -73,6 +74,11 @@ fn run() -> Result<()> {
             let repo = repo::discover()?;
             let report = related::build_report(&repo, &query)?;
             related::write_report(&report, json)?;
+        }
+        cli::Commands::Blast { query, json } => {
+            let repo = repo::discover()?;
+            let report = blast::build_report(&repo, &query)?;
+            blast::write_report(&report, json)?;
         }
     }
 

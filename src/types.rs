@@ -172,6 +172,87 @@ pub struct RelatedReport {
     pub next_actions: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BlastMode {
+    File,
+    Symbol,
+}
+
+impl std::fmt::Display for BlastMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            BlastMode::File => "file",
+            BlastMode::Symbol => "symbol",
+        };
+        write!(f, "{value}")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BlastRiskLevel {
+    Low,
+    Medium,
+    High,
+}
+
+impl std::fmt::Display for BlastRiskLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            BlastRiskLevel::Low => "low",
+            BlastRiskLevel::Medium => "medium",
+            BlastRiskLevel::High => "high",
+        };
+        write!(f, "{value}")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BlastImpactContext {
+    Production,
+    TestFixture,
+    SameArea,
+    Unknown,
+}
+
+impl std::fmt::Display for BlastImpactContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            BlastImpactContext::Production => "production",
+            BlastImpactContext::TestFixture => "test/fixture",
+            BlastImpactContext::SameArea => "same_area",
+            BlastImpactContext::Unknown => "unknown",
+        };
+        write!(f, "{value}")
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BlastImpactedFile {
+    pub path: String,
+    pub role: String,
+    pub score: f64,
+    pub confidence: Confidence,
+    pub context: BlastImpactContext,
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BlastReport {
+    pub query: String,
+    pub mode: BlastMode,
+    pub index_status: String,
+    pub risk_level: BlastRiskLevel,
+    pub risk_reasons: Vec<String>,
+    pub impacted_files: Vec<BlastImpactedFile>,
+    pub affected_symbols: Vec<IndexedSymbol>,
+    pub references: Vec<crate::index::IndexedSymbolReference>,
+    pub suggested_inspection_order: Vec<String>,
+    pub next_actions: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SymbolMatch {
     pub symbol: IndexedSymbol,
