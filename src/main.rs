@@ -3,6 +3,7 @@ mod cli;
 mod index;
 mod map;
 mod output;
+mod parser;
 mod rank;
 mod related;
 mod repo;

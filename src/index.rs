@@ -12,6 +12,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::parser::extracted::{dedup_edges, dedup_symbols};
 use crate::repo::{display_path, RepoInfo};
 use crate::text::shorten_snippet;
 use crate::types::{IndexedSymbol, SymbolKind, Visibility};
@@ -134,7 +135,7 @@ impl std::fmt::Display for FileRole {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EdgeConfidence {
     Extracted,
@@ -473,14 +474,19 @@ fn build_index(repo: &RepoInfo) -> Result<RepoIndex> {
         .map(|file| file.path.clone())
         .collect();
 
-    let symbols = build_rust_symbols(&files, &source_texts);
+    let parsed_facts = crate::parser::extract_repo_facts(&files, &source_texts);
+    let parsed_facts =
+        crate::parser::combine_with_rust_fallback(parsed_facts, &files, &source_texts);
+    let mut symbols = parsed_facts.symbols;
+    let mut edges = parsed_facts.edges;
+    dedup_symbols(&mut symbols);
+    dedup_edges(&mut edges);
     let symbol_references = build_rust_symbol_references(&files, &source_texts, &symbols);
     let symbol_reference_count = symbol_references.len();
-    let mut edges = Vec::new();
-    edges.extend(build_rust_edges(&files, &source_texts));
     edges.extend(build_same_area_edges(&files));
     edges.extend(build_test_edges(&files, &source_paths));
     edges.extend(build_config_edges(&files, &source_paths));
+    dedup_edges(&mut edges);
 
     let file_count = files.len();
     let role_counts = count_roles(&files);
@@ -579,7 +585,7 @@ fn build_config_edges(files: &[IndexedFile], source_paths: &[String]) -> Vec<Ind
     edges
 }
 
-fn build_rust_symbols(
+pub(crate) fn build_rust_symbols(
     files: &[IndexedFile],
     source_texts: &BTreeMap<String, String>,
 ) -> Vec<IndexedSymbol> {
@@ -1145,7 +1151,7 @@ fn symbol_record(
     }
 }
 
-fn rust_visibility_prefix(line: &str) -> (Visibility, &str) {
+pub(crate) fn rust_visibility_prefix(line: &str) -> (Visibility, &str) {
     let trimmed = line.trim_start();
     if let Some(rest) = trimmed.strip_prefix("pub(crate)") {
         return (Visibility::Public, rest.trim_start());
@@ -1184,7 +1190,7 @@ fn strip_rust_item_prefixes(line: &str) -> &str {
     current
 }
 
-fn parse_rust_module_symbol(line: &str) -> Option<String> {
+pub(crate) fn parse_rust_module_symbol(line: &str) -> Option<String> {
     let remainder = line.strip_prefix("mod ")?;
     let name = remainder.trim().strip_suffix(';')?.trim();
     if is_rust_identifier(name) {
@@ -1194,32 +1200,32 @@ fn parse_rust_module_symbol(line: &str) -> Option<String> {
     }
 }
 
-fn parse_rust_function_symbol(line: &str) -> Option<String> {
+pub(crate) fn parse_rust_function_symbol(line: &str) -> Option<String> {
     let remainder = line.strip_prefix("fn ")?;
     parse_rust_identifier_name(remainder)
 }
 
-fn parse_rust_struct_symbol(line: &str) -> Option<String> {
+pub(crate) fn parse_rust_struct_symbol(line: &str) -> Option<String> {
     let remainder = line.strip_prefix("struct ")?;
     parse_rust_identifier_name(remainder)
 }
 
-fn parse_rust_enum_symbol(line: &str) -> Option<String> {
+pub(crate) fn parse_rust_enum_symbol(line: &str) -> Option<String> {
     let remainder = line.strip_prefix("enum ")?;
     parse_rust_identifier_name(remainder)
 }
 
-fn parse_rust_trait_symbol(line: &str) -> Option<String> {
+pub(crate) fn parse_rust_trait_symbol(line: &str) -> Option<String> {
     let remainder = line.strip_prefix("trait ")?;
     parse_rust_identifier_name(remainder)
 }
 
-fn parse_rust_type_alias_symbol(line: &str) -> Option<String> {
+pub(crate) fn parse_rust_type_alias_symbol(line: &str) -> Option<String> {
     let remainder = line.strip_prefix("type ")?;
     parse_rust_identifier_name(remainder)
 }
 
-fn parse_rust_const_symbol(line: &str) -> Option<String> {
+pub(crate) fn parse_rust_const_symbol(line: &str) -> Option<String> {
     let remainder = line.strip_prefix("const ")?;
     if remainder.trim_start().starts_with("fn ") {
         return None;
@@ -1227,13 +1233,13 @@ fn parse_rust_const_symbol(line: &str) -> Option<String> {
     parse_rust_const_like_name(remainder)
 }
 
-fn parse_rust_static_symbol(line: &str) -> Option<String> {
+pub(crate) fn parse_rust_static_symbol(line: &str) -> Option<String> {
     let remainder = line.strip_prefix("static ")?;
     let remainder = remainder.strip_prefix("mut ").unwrap_or(remainder);
     parse_rust_const_like_name(remainder)
 }
 
-fn parse_rust_impl_symbol(line: &str) -> Option<String> {
+pub(crate) fn parse_rust_impl_symbol(line: &str) -> Option<String> {
     let remainder = line.strip_prefix("impl ")?;
     parse_rust_impl_name(remainder)
 }
@@ -1338,7 +1344,7 @@ fn read_rust_identifier(text: &str) -> Option<(String, &str)> {
     Some((text[..end].to_string(), &text[end..]))
 }
 
-fn build_rust_edges(
+pub(crate) fn build_rust_edges(
     files: &[IndexedFile],
     source_texts: &BTreeMap<String, String>,
 ) -> Vec<IndexedEdge> {
@@ -1589,7 +1595,7 @@ fn rust_module_lookup_key(path: &str) -> Option<String> {
     }
 }
 
-fn rust_module_path_components(path: &str) -> Vec<String> {
+pub(crate) fn rust_module_path_components(path: &str) -> Vec<String> {
     let normalized = path.replace('\\', "/");
     let stripped = if let Some(value) = normalized.strip_prefix("src/") {
         value.to_string()
@@ -1614,11 +1620,11 @@ fn rust_module_path_components(path: &str) -> Vec<String> {
         .collect()
 }
 
-fn rust_module_name_from_path(path: &str) -> Option<String> {
+pub(crate) fn rust_module_name_from_path(path: &str) -> Option<String> {
     rust_module_lookup_key(path).and_then(|key| key.split('/').next().map(|part| part.to_string()))
 }
 
-fn rust_module_display_path_from_path(path: &str) -> Option<String> {
+pub(crate) fn rust_module_display_path_from_path(path: &str) -> Option<String> {
     let components = rust_module_path_components(path);
     if components.is_empty() {
         None
@@ -1627,7 +1633,7 @@ fn rust_module_display_path_from_path(path: &str) -> Option<String> {
     }
 }
 
-fn resolve_rust_module_path(
+pub(crate) fn resolve_rust_module_path(
     candidate: &[String],
     module_lookup: &HashMap<String, String>,
 ) -> Option<String> {
@@ -1641,7 +1647,7 @@ fn resolve_rust_module_path(
     None
 }
 
-fn resolve_rust_use_path(
+pub(crate) fn resolve_rust_use_path(
     candidate: &[String],
     current_module_path: &[String],
     module_lookup: &HashMap<String, String>,
@@ -1673,7 +1679,7 @@ fn resolve_rust_use_path(
     })
 }
 
-fn parse_rust_mod_declaration(line: &str) -> Option<String> {
+pub(crate) fn parse_rust_mod_declaration(line: &str) -> Option<String> {
     let (_, trimmed) = rust_visibility_prefix(line);
     let remainder = trimmed.strip_prefix("mod ")?;
     let name = remainder.strip_suffix(';')?.trim();
@@ -1684,7 +1690,7 @@ fn parse_rust_mod_declaration(line: &str) -> Option<String> {
     }
 }
 
-fn parse_rust_use_statement(line: &str) -> Option<&str> {
+pub(crate) fn parse_rust_use_statement(line: &str) -> Option<&str> {
     let (_, trimmed) = rust_visibility_prefix(line);
     trimmed
         .strip_prefix("use ")?
@@ -1692,7 +1698,7 @@ fn parse_rust_use_statement(line: &str) -> Option<&str> {
         .map(str::trim)
 }
 
-fn expand_rust_use_paths(body: &str) -> Vec<Vec<String>> {
+pub(crate) fn expand_rust_use_paths(body: &str) -> Vec<Vec<String>> {
     let body = body.trim();
     if body.is_empty() {
         return Vec::new();
@@ -1728,7 +1734,7 @@ fn expand_rust_use_paths(body: &str) -> Vec<Vec<String>> {
     }
 }
 
-fn parse_rust_path_segments(text: &str) -> Vec<String> {
+pub(crate) fn parse_rust_path_segments(text: &str) -> Vec<String> {
     text.split("::")
         .filter_map(|part| {
             let trimmed = part.trim();
@@ -1741,13 +1747,13 @@ fn parse_rust_path_segments(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn strip_rust_alias(text: &str) -> &str {
+pub(crate) fn strip_rust_alias(text: &str) -> &str {
     text.split_once(" as ")
         .map(|(value, _)| value)
         .unwrap_or(text)
 }
 
-fn split_top_level_commas(text: &str) -> Vec<&str> {
+pub(crate) fn split_top_level_commas(text: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut start = 0usize;
     let mut depth = 0usize;
@@ -1768,7 +1774,7 @@ fn split_top_level_commas(text: &str) -> Vec<&str> {
     parts
 }
 
-fn matching_brace(text: &str, open_idx: usize) -> Option<usize> {
+pub(crate) fn matching_brace(text: &str, open_idx: usize) -> Option<usize> {
     let mut depth = 0usize;
     for (idx, ch) in text.char_indices().skip_while(|(idx, _)| *idx < open_idx) {
         match ch {
@@ -1920,7 +1926,7 @@ fn collect_files(
             content_hash,
         });
 
-        if path.extension().and_then(|value| value.to_str()) == Some("rs") {
+        if crate::parser::language::detect_language(&relative_path).is_some() {
             let contents = fs::read_to_string(path)
                 .with_context(|| format!("failed to read source file {}", display_path(path)))?;
             source_texts.insert(relative_path, contents);
