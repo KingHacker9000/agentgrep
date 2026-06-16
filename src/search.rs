@@ -14,7 +14,12 @@ pub struct SearchResult {
     pub match_limit_hit: bool,
 }
 
-pub fn run(repo_root: &std::path::Path, query: &str) -> Result<SearchResult> {
+pub fn run_with_index(
+    repo_root: &std::path::Path,
+    query: &str,
+    index_used: bool,
+    index_status: &str,
+) -> Result<SearchResult> {
     let token_patterns = build_token_patterns(query);
     let exact_phrase = normalize_phrase(query);
 
@@ -58,11 +63,27 @@ pub fn run(repo_root: &std::path::Path, query: &str) -> Result<SearchResult> {
         )?;
     }
 
+    let coverage = apply_index_metadata(
+        SearchCoverage::new(raw_match_count, seen_files.len(), MATCH_LIMIT_PER_FILE),
+        index_used,
+        index_status,
+    );
+
     Ok(SearchResult {
         matches,
-        coverage: SearchCoverage::new(raw_match_count, seen_files.len(), MATCH_LIMIT_PER_FILE),
+        coverage,
         match_limit_hit,
     })
+}
+
+pub(crate) fn apply_index_metadata(
+    mut coverage: SearchCoverage,
+    index_used: bool,
+    index_status: &str,
+) -> SearchCoverage {
+    coverage.index_used = index_used;
+    coverage.index_status = index_status.to_string();
+    coverage
 }
 
 fn collect_matches(
@@ -227,5 +248,17 @@ mod tests {
         assert_eq!(coverage.candidate_limit, 8);
         assert!(!coverage.index_used);
         assert_eq!(coverage.index_status, "not_applicable");
+    }
+
+    #[test]
+    fn coverage_records_index_usage_when_available() {
+        let coverage = apply_index_metadata(
+            SearchCoverage::new(12, 4, MATCH_LIMIT_PER_FILE),
+            true,
+            "fresh",
+        );
+
+        assert!(coverage.index_used);
+        assert_eq!(coverage.index_status, "fresh");
     }
 }

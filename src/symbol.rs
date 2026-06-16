@@ -161,36 +161,7 @@ fn render_used_by(references: &[IndexedSymbolReference]) {
         return;
     }
 
-    let total = references.iter().map(reference_total_count).sum::<usize>();
-    let production = references
-        .iter()
-        .filter(|reference| matches!(reference.context, ReferenceContext::Production))
-        .map(reference_total_count)
-        .sum::<usize>();
-    let fixture_test = references
-        .iter()
-        .filter(|reference| {
-            matches!(
-                reference.context,
-                ReferenceContext::Fixture | ReferenceContext::Test
-            )
-        })
-        .map(reference_total_count)
-        .sum::<usize>();
-    let unknown = references
-        .iter()
-        .filter(|reference| matches!(reference.context, ReferenceContext::Unknown))
-        .map(reference_total_count)
-        .sum::<usize>();
-
-    print!(
-        "  Used by ({} total; production {}; test/fixture {}",
-        total, production, fixture_test
-    );
-    if unknown > 0 {
-        print!("; unknown {}", unknown);
-    }
-    println!("):");
+    println!("{}", used_by_header(references));
 
     let display_references = summarize_used_by_display(references);
     for reference in display_references
@@ -226,6 +197,40 @@ fn render_used_by(references: &[IndexedSymbolReference]) {
             display_references.len()
         );
     }
+}
+
+fn used_by_header(references: &[IndexedSymbolReference]) -> String {
+    let total = references.iter().map(reference_total_count).sum::<usize>();
+    let production = references
+        .iter()
+        .filter(|reference| matches!(reference.context, ReferenceContext::Production))
+        .map(reference_total_count)
+        .sum::<usize>();
+    let fixture_test = references
+        .iter()
+        .filter(|reference| {
+            matches!(
+                reference.context,
+                ReferenceContext::Fixture | ReferenceContext::Test
+            )
+        })
+        .map(reference_total_count)
+        .sum::<usize>();
+    let unknown = references
+        .iter()
+        .filter(|reference| matches!(reference.context, ReferenceContext::Unknown))
+        .map(reference_total_count)
+        .sum::<usize>();
+
+    let mut header = format!(
+        "  Used by ({} total; production {}; test/fixture {}",
+        total, production, fixture_test
+    );
+    if unknown > 0 {
+        header.push_str(&format!("; unknown {}", unknown));
+    }
+    header.push_str("):");
+    header
 }
 
 fn match_symbols<'a>(
@@ -858,6 +863,54 @@ mod tests {
         assert_eq!(display.len(), 2);
         assert_eq!(display[0].from_file, "src/main.rs");
         assert_eq!(display[1].from_file, "src/symbol.rs");
+        assert_eq!(display[1].additional_count, 1);
+    }
+
+    #[test]
+    fn used_by_header_includes_totals_and_unknown_counts() {
+        let references = vec![
+            crate::index::IndexedSymbolReference {
+                from_file: "src/main.rs".to_string(),
+                symbol_name: "SearchResult".to_string(),
+                target_file: Some("src/search.rs".to_string()),
+                target_line: Some(11),
+                line_number: 24,
+                confidence: EdgeConfidence::Extracted,
+                reason: "use statement reference".to_string(),
+                context: crate::index::ReferenceContext::Production,
+                additional_count: 0,
+            },
+            crate::index::IndexedSymbolReference {
+                from_file: "src/symbol.rs".to_string(),
+                symbol_name: "SearchResult".to_string(),
+                target_file: Some("src/search.rs".to_string()),
+                target_line: Some(11),
+                line_number: 478,
+                confidence: EdgeConfidence::Inferred,
+                reason: "qualified or token reference".to_string(),
+                context: crate::index::ReferenceContext::Fixture,
+                additional_count: 1,
+            },
+            crate::index::IndexedSymbolReference {
+                from_file: "src/tests.rs".to_string(),
+                symbol_name: "SearchResult".to_string(),
+                target_file: Some("src/search.rs".to_string()),
+                target_line: Some(11),
+                line_number: 12,
+                confidence: EdgeConfidence::Inferred,
+                reason: "qualified or token reference".to_string(),
+                context: crate::index::ReferenceContext::Unknown,
+                additional_count: 0,
+            },
+        ];
+
+        assert_eq!(
+            used_by_header(&references),
+            "  Used by (4 total; production 1; test/fixture 2; unknown 1):"
+        );
+
+        let display = summarize_used_by_display(&references);
+        assert_eq!(display.len(), 3);
         assert_eq!(display[1].additional_count, 1);
     }
 

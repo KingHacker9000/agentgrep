@@ -24,7 +24,7 @@ pub struct FileCandidate {
     pub evidence: Vec<Evidence>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Confidence {
     High,

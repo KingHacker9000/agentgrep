@@ -28,8 +28,16 @@ fn run() -> Result<()> {
         cli::Commands::Find { query, json } => {
             let started = std::time::Instant::now();
             let repo = repo::discover()?;
-            let search = search::run(&repo.root, &query)?;
-            let candidates = rank::rank(&query, search.matches);
+            let loaded = index::load(&repo)?;
+            let index_used = loaded.index.is_some();
+            let index_status = if index_used {
+                loaded.state.to_string()
+            } else {
+                "not_applicable".to_string()
+            };
+            let search = search::run_with_index(&repo.root, &query, index_used, &index_status)?;
+            let candidates =
+                rank::rank_with_index(&query, search.matches, loaded.index.as_ref(), &index_status);
             let next_actions =
                 rank::next_actions(&query, &candidates, &repo::display_path(&repo.root));
             let mut coverage = search

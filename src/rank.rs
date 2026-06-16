@@ -1,11 +1,19 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::index::{self, EdgeConfidence, IndexedEdge, IndexedSymbolReference, ReferenceContext};
 use crate::text::{normalize_phrase, shorten_snippet, squash_identifier, tokenize_terms};
-use crate::types::{Confidence, Evidence, FileCandidate, LineRange, SearchMatch, Snippet};
+use crate::types::{
+    Confidence, Evidence, FileCandidate, IndexedSymbol, LineRange, SearchMatch, Snippet,
+};
 
 pub const CANDIDATE_LIMIT: usize = 8;
 
-pub fn rank(query: &str, matches: Vec<SearchMatch>) -> Vec<FileCandidate> {
+pub fn rank_with_index(
+    query: &str,
+    matches: Vec<SearchMatch>,
+    index: Option<&index::RepoIndex>,
+    index_status: &str,
+) -> Vec<FileCandidate> {
     let profile = QueryProfile::new(query);
     let mut grouped: BTreeMap<String, Vec<SearchMatch>> = BTreeMap::new();
 
@@ -17,20 +25,29 @@ pub fn rank(query: &str, matches: Vec<SearchMatch>) -> Vec<FileCandidate> {
         .into_iter()
         .map(|(path, mut matches)| {
             matches.sort_by_key(|item| item.line_number);
-            build_candidate(path, matches, &profile)
+            build_candidate(path, matches, &profile, index, index_status)
         })
         .collect::<Vec<_>>();
 
     candidates.sort_by(|left, right| {
         right
-            .score
-            .partial_cmp(&left.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| left.path.cmp(&right.path))
+            .tier
+            .cmp(&left.tier)
+            .then_with(|| {
+                right
+                    .candidate
+                    .score
+                    .partial_cmp(&left.candidate.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| left.candidate.path.cmp(&right.candidate.path))
     });
 
-    candidates.truncate(CANDIDATE_LIMIT);
     candidates
+        .into_iter()
+        .map(finalize_ranked_candidate)
+        .take(CANDIDATE_LIMIT)
+        .collect()
 }
 
 pub fn next_actions(_query: &str, candidates: &[FileCandidate], repo_root: &str) -> Vec<String> {
@@ -84,7 +101,9 @@ fn build_candidate(
     path: String,
     matches: Vec<SearchMatch>,
     profile: &QueryProfile,
-) -> FileCandidate {
+    index: Option<&index::RepoIndex>,
+    index_status: &str,
+) -> RankedCandidate {
     let normalized_path = path.replace('\\', "/");
     let lower_path = normalized_path.to_lowercase();
     let path_tokens = tokenize_terms(&normalized_path);
@@ -150,6 +169,19 @@ fn build_candidate(
 
     apply_role_weight(&role, profile, &mut score, &mut evidence);
 
+    let mut index_tier = 0usize;
+    if let Some(index) = index {
+        index_tier = apply_index_evidence(
+            &normalized_path,
+            &role,
+            profile,
+            index,
+            index_status,
+            &mut score,
+            &mut evidence,
+        );
+    }
+
     let snippets = build_snippets(&clusters, profile);
     if !snippets.is_empty() {
         score += 0.01 * snippets.len().min(3) as f64;
@@ -190,15 +222,18 @@ fn build_candidate(
         &snippets,
     );
 
-    FileCandidate {
-        path,
-        kind: "file".to_string(),
-        role: role.to_string(),
-        score,
-        confidence,
-        line_ranges: compress_line_ranges(&matches),
-        snippets,
-        evidence,
+    RankedCandidate {
+        candidate: FileCandidate {
+            path,
+            kind: "file".to_string(),
+            role: role.to_string(),
+            score,
+            confidence,
+            line_ranges: compress_line_ranges(&matches),
+            snippets,
+            evidence,
+        },
+        tier: index_tier,
     }
 }
 
@@ -395,6 +430,330 @@ fn apply_role_weight(
             });
         }
         FileRole::Other => {}
+    }
+}
+
+fn apply_index_evidence(
+    path: &str,
+    role: &FileRole,
+    profile: &QueryProfile,
+    index: &index::RepoIndex,
+    index_status: &str,
+    score: &mut f64,
+    evidence: &mut Vec<Evidence>,
+) -> usize {
+    let scale = index_boost_scale(index_status);
+    if scale <= 0.0 {
+        return 0;
+    }
+
+    let mut boosts = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for symbol in index
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.file_path == path)
+    {
+        if let Some(signal) = symbol_definition_signal(symbol, profile, role, scale) {
+            let key = format!("definition:{}:{}", symbol.name, symbol.line_number);
+            if seen.insert(key) {
+                boosts.push(signal);
+            }
+        }
+    }
+
+    for reference in index.symbol_references.iter().filter(|reference| {
+        reference.from_file == path && reference_matches_profile(reference, profile)
+    }) {
+        if let Some(signal) = symbol_reference_signal(reference, scale) {
+            let key = format!(
+                "reference:{}:{}:{}",
+                reference.symbol_name, reference.line_number, reference.reason
+            );
+            if seen.insert(key) {
+                boosts.push(signal);
+            }
+        }
+    }
+
+    for edge in index
+        .edges
+        .iter()
+        .filter(|edge| edge.from == path || edge.to == path)
+    {
+        if let Some(signal) = edge_signal(edge, path, scale) {
+            let key = format!("edge:{}:{}:{}", edge.edge_type, edge.from, edge.to);
+            if seen.insert(key) {
+                boosts.push(signal);
+            }
+        }
+    }
+
+    boosts.sort_by(|left, right| {
+        right
+            .tier
+            .cmp(&left.tier)
+            .then_with(|| {
+                right
+                    .score
+                    .partial_cmp(&left.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| {
+                index_confidence_priority(left.confidence)
+                    .cmp(&index_confidence_priority(right.confidence))
+            })
+            .then_with(|| {
+                left.evidence
+                    .evidence_type
+                    .cmp(&right.evidence.evidence_type)
+            })
+    });
+    let index_tier = boosts.iter().map(|signal| signal.tier).max().unwrap_or(0);
+    boosts.truncate(3);
+
+    for signal in boosts.into_iter().rev() {
+        *score += signal.score;
+        evidence.insert(0, signal.evidence);
+    }
+
+    index_tier
+}
+
+fn index_boost_scale(index_status: &str) -> f64 {
+    match index_status {
+        "fresh" => 1.0,
+        "stale" => 0.85,
+        "unverifiable" => 0.8,
+        "missing" => 0.0,
+        _ => 0.8,
+    }
+}
+
+fn symbol_definition_signal(
+    symbol: &IndexedSymbol,
+    profile: &QueryProfile,
+    role: &FileRole,
+    scale: f64,
+) -> Option<IndexSignal> {
+    let strength = symbol_match_strength(&symbol.name, profile)?;
+    let (base, tier, confidence) = match strength {
+        SymbolMatchStrength::Exact => {
+            let base = match role {
+                FileRole::Source => 0.68,
+                FileRole::Doc => 0.32,
+                FileRole::Test => 0.44,
+                FileRole::Config => 0.36,
+                FileRole::Lockfile => 0.16,
+                FileRole::Generated => 0.06,
+                FileRole::Other => 0.40,
+            };
+            (base, 4, Confidence::High)
+        }
+        SymbolMatchStrength::Strong => (0.28, 3, Confidence::Medium),
+        SymbolMatchStrength::Loose => (0.14, 2, Confidence::Low),
+    };
+    let mut score = base * scale;
+
+    if score <= 0.0 {
+        return None;
+    }
+
+    if matches!(strength, SymbolMatchStrength::Exact) && matches!(role, FileRole::Source) {
+        score += 0.10 * scale;
+    }
+
+    Some(IndexSignal {
+        score,
+        confidence,
+        tier,
+        evidence: Evidence {
+            evidence_type: "indexed_symbol_definition".to_string(),
+            detail: format!("defines symbol {}", symbol.name),
+        },
+    })
+}
+
+fn symbol_reference_signal(reference: &IndexedSymbolReference, scale: f64) -> Option<IndexSignal> {
+    let (base, tier) = match reference.context {
+        ReferenceContext::Production => (0.16, 2),
+        ReferenceContext::Fixture => (0.04, 1),
+        ReferenceContext::Test => (0.03, 1),
+        ReferenceContext::Unknown => (0.01, 0),
+    };
+    let confidence_bonus = match reference.confidence {
+        EdgeConfidence::Extracted => 0.03,
+        EdgeConfidence::Inferred => 0.0,
+        EdgeConfidence::Ambiguous => -0.01,
+    };
+    let confidence = match reference.confidence {
+        EdgeConfidence::Extracted => Confidence::High,
+        EdgeConfidence::Inferred => Confidence::Medium,
+        EdgeConfidence::Ambiguous => Confidence::Low,
+    };
+    let score = if base + confidence_bonus > 0.0 {
+        (base + confidence_bonus) * scale
+    } else {
+        0.0
+    };
+    if score <= 0.0 {
+        return None;
+    }
+
+    Some(IndexSignal {
+        score,
+        confidence,
+        tier,
+        evidence: Evidence {
+            evidence_type: "indexed_symbol_reference".to_string(),
+            detail: format!("references symbol {}", reference.symbol_name),
+        },
+    })
+}
+
+fn edge_signal(edge: &IndexedEdge, path: &str, scale: f64) -> Option<IndexSignal> {
+    let (base, tier) = match edge.edge_type.as_str() {
+        "imports" | "references" | "declares_module" => (0.05, 1),
+        "same_area" => (0.005, 0),
+        _ => (0.01, 0),
+    };
+    let directional_bonus = if edge.to == path && edge.edge_type != "same_area" {
+        0.01
+    } else {
+        0.0
+    };
+    let score = (base + directional_bonus) * scale;
+    if score <= 0.0 {
+        return None;
+    }
+
+    Some(IndexSignal {
+        score,
+        confidence: if edge.edge_type == "same_area" {
+            Confidence::Low
+        } else {
+            Confidence::Medium
+        },
+        tier,
+        evidence: Evidence {
+            evidence_type: "indexed_edge".to_string(),
+            detail: format!("indexed edge {} {}", edge.edge_type, edge.reason),
+        },
+    })
+}
+
+fn reference_matches_profile(reference: &IndexedSymbolReference, profile: &QueryProfile) -> bool {
+    let name = reference.symbol_name.to_lowercase();
+    if !profile.squashed_phrase.is_empty() && squash_identifier(&name) == profile.squashed_phrase {
+        return true;
+    }
+
+    if !profile.normalized_phrase.is_empty() && name == profile.normalized_phrase {
+        return true;
+    }
+
+    let name_terms = tokenize_terms(&reference.symbol_name);
+    profile
+        .terms
+        .iter()
+        .all(|term| name_terms.iter().any(|name_term| name_term == term))
+}
+
+#[derive(Clone, Copy)]
+enum SymbolMatchStrength {
+    Exact,
+    Strong,
+    Loose,
+}
+
+fn symbol_match_strength(name: &str, profile: &QueryProfile) -> Option<SymbolMatchStrength> {
+    let normalized = normalize_phrase(name);
+    let squashed = squash_identifier(name);
+
+    if !profile.squashed_phrase.is_empty() && squashed == profile.squashed_phrase {
+        return Some(SymbolMatchStrength::Exact);
+    }
+
+    if !profile.normalized_phrase.is_empty() && normalized == profile.normalized_phrase {
+        return Some(SymbolMatchStrength::Exact);
+    }
+
+    if !profile.squashed_phrase.is_empty() && squashed.contains(&profile.squashed_phrase) {
+        return Some(SymbolMatchStrength::Strong);
+    }
+
+    if profile
+        .terms
+        .iter()
+        .all(|term| squash_identifier(name).contains(term))
+    {
+        return Some(SymbolMatchStrength::Strong);
+    }
+
+    if profile.terms.iter().any(|term| {
+        tokenize_terms(name)
+            .iter()
+            .any(|name_term| name_term == term)
+    }) {
+        return Some(SymbolMatchStrength::Loose);
+    }
+
+    None
+}
+
+struct IndexSignal {
+    score: f64,
+    confidence: Confidence,
+    tier: usize,
+    evidence: Evidence,
+}
+
+struct RankedCandidate {
+    candidate: FileCandidate,
+    tier: usize,
+}
+
+fn finalize_ranked_candidate(mut ranked: RankedCandidate) -> FileCandidate {
+    let tier = ranked.tier;
+    let has_index_definition = ranked
+        .candidate
+        .evidence
+        .iter()
+        .any(|item| item.evidence_type == "indexed_symbol_definition");
+    let has_index_reference = ranked
+        .candidate
+        .evidence
+        .iter()
+        .any(|item| item.evidence_type == "indexed_symbol_reference");
+    let has_index_edge = ranked
+        .candidate
+        .evidence
+        .iter()
+        .any(|item| item.evidence_type == "indexed_edge");
+
+    if tier > 0 {
+        let tier_score = tier as f64;
+        ranked.candidate.score = round_score(tier_score + ranked.candidate.score * 0.1);
+        ranked.candidate.confidence = if has_index_definition {
+            Confidence::High
+        } else if tier >= 2 || has_index_reference {
+            Confidence::Medium
+        } else if has_index_edge {
+            Confidence::Low
+        } else {
+            ranked.candidate.confidence
+        };
+    }
+
+    ranked.candidate
+}
+
+fn index_confidence_priority(confidence: Confidence) -> usize {
+    match confidence {
+        Confidence::High => 0,
+        Confidence::Medium => 1,
+        Confidence::Low => 2,
     }
 }
 
@@ -891,12 +1250,64 @@ fn round_score(score: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::{
+        EdgeConfidence, FileRole as IndexFileRole, IndexStats, IndexedEdge, IndexedFile,
+        IndexedSymbolReference, ReferenceContext, RepoIndex,
+    };
+    use std::collections::BTreeMap;
 
     fn match_item(path: &str, line_number: usize, snippet: &str) -> SearchMatch {
         SearchMatch {
             path: path.to_string(),
             line_number,
             snippet: snippet.to_string(),
+        }
+    }
+
+    fn indexed_symbol(name: &str, file_path: &str, line_number: usize) -> IndexedSymbol {
+        IndexedSymbol {
+            name: name.to_string(),
+            kind: crate::types::SymbolKind::Struct,
+            file_path: file_path.to_string(),
+            line_number,
+            visibility: crate::types::Visibility::Public,
+            signature: Some(format!("pub struct {name} {{")),
+        }
+    }
+
+    fn indexed_file(path: &str, role: IndexFileRole) -> IndexedFile {
+        IndexedFile {
+            path: path.to_string(),
+            role,
+            size_bytes: None,
+            modified_unix: None,
+            content_hash: None,
+        }
+    }
+
+    fn repo_index(
+        symbols: Vec<IndexedSymbol>,
+        references: Vec<IndexedSymbolReference>,
+        edges: Vec<IndexedEdge>,
+        files: Vec<IndexedFile>,
+    ) -> RepoIndex {
+        RepoIndex {
+            schema_version: crate::index::INDEX_SCHEMA_VERSION,
+            repo_root: "C:/repo".to_string(),
+            repo_rev: Some("abc".to_string()),
+            indexed_at_unix: 1,
+            files,
+            symbols,
+            symbol_references: references,
+            edges,
+            stats: IndexStats {
+                file_count: 2,
+                role_counts: BTreeMap::from([(IndexFileRole::Source, 2)]),
+                symbol_count: 0,
+                symbol_kind_counts: BTreeMap::new(),
+                symbol_reference_count: 0,
+                connection_count: 0,
+            },
         }
     }
 
@@ -907,7 +1318,7 @@ mod tests {
             match_item("src/lib.rs", 4, "rg"),
         ];
 
-        let candidates = rank("rg", matches);
+        let candidates = rank_with_index("rg", matches, None, "not_applicable");
         assert_eq!(candidates.first().unwrap().path, "src/lib.rs");
         assert_ne!(candidates.first().unwrap().path, "Cargo.lock");
     }
@@ -928,7 +1339,7 @@ mod tests {
             ),
         ];
 
-        let candidates = rank("rg was not found", matches);
+        let candidates = rank_with_index("rg was not found", matches, None, "not_applicable");
         assert_eq!(candidates.first().unwrap().path, "src/search.rs");
         assert!(candidates
             .first()
@@ -950,7 +1361,7 @@ mod tests {
             match_item("src/search.rs", 40, "return Err(anyhow!(\"rg failed\"));"),
         ];
 
-        let candidates = rank("rg was not found", matches);
+        let candidates = rank_with_index("rg was not found", matches, None, "not_applicable");
         let candidate = candidates.first().unwrap();
         assert_eq!(candidate.path, "src/search.rs");
         assert!(!candidate.snippets.is_empty());
@@ -966,7 +1377,7 @@ mod tests {
             match_item("src/main.rs", 8, "query"),
         ];
 
-        let candidates = rank("query", matches);
+        let candidates = rank_with_index("query", matches, None, "not_applicable");
         assert_eq!(candidates.first().unwrap().path, "src/main.rs");
         let cargo = candidates
             .iter()
@@ -986,7 +1397,7 @@ mod tests {
             match_item("src/types.rs", 20, "pub struct LineRanges;"),
         ];
 
-        let candidates = rank("line_ranges", matches);
+        let candidates = rank_with_index("line_ranges", matches, None, "not_applicable");
         assert_eq!(candidates.first().unwrap().path, "src/types.rs");
         assert_eq!(candidates.first().unwrap().role, "source");
     }
@@ -1003,7 +1414,7 @@ mod tests {
             match_item("src/main.rs", 30, "third line"),
         ];
 
-        let candidates = rank("snippet", matches);
+        let candidates = rank_with_index("snippet", matches, None, "not_applicable");
         let snippets = &candidates.first().unwrap().snippets;
         assert!(!snippets.is_empty());
         assert!(snippets.iter().all(|snippet| snippet.text.len() <= 88));
@@ -1022,10 +1433,209 @@ mod tests {
             match_item("docs/README.md", 200, "report"),
         ];
 
-        let strong_candidate = rank("SearchReport", strong).remove(0);
-        let weak_candidate = rank("search report", weak).remove(0);
+        let strong_candidate =
+            rank_with_index("SearchReport", strong, None, "not_applicable").remove(0);
+        let weak_candidate =
+            rank_with_index("search report", weak, None, "not_applicable").remove(0);
 
         assert_eq!(strong_candidate.confidence, Confidence::High);
         assert_eq!(weak_candidate.confidence, Confidence::Low);
+    }
+
+    #[test]
+    fn exact_symbol_definition_ranks_definition_file_first_with_index() {
+        let matches = vec![
+            match_item(
+                "src/search.rs",
+                11,
+                "pub struct SearchResult {",
+            ),
+            match_item(
+                "src/blast.rs",
+                1492,
+                "let report = build_report_from_loaded(&repo(), &loaded_index(), \"SearchResult\").unwrap();",
+            ),
+            match_item(
+                "src/related.rs",
+                1241,
+                "let report = build_report_from_loaded(&repo(), &loaded_index(), \"SearchResult\").unwrap();",
+            ),
+        ];
+        let index = repo_index(
+            vec![indexed_symbol("SearchResult", "src/search.rs", 11)],
+            vec![
+                IndexedSymbolReference {
+                    from_file: "src/blast.rs".to_string(),
+                    symbol_name: "SearchResult".to_string(),
+                    target_file: Some("src/search.rs".to_string()),
+                    target_line: Some(11),
+                    line_number: 1492,
+                    confidence: EdgeConfidence::Inferred,
+                    reason: "qualified or token reference".to_string(),
+                    context: ReferenceContext::Test,
+                    additional_count: 0,
+                },
+                IndexedSymbolReference {
+                    from_file: "src/related.rs".to_string(),
+                    symbol_name: "SearchResult".to_string(),
+                    target_file: Some("src/search.rs".to_string()),
+                    target_line: Some(11),
+                    line_number: 1241,
+                    confidence: EdgeConfidence::Inferred,
+                    reason: "qualified or token reference".to_string(),
+                    context: ReferenceContext::Fixture,
+                    additional_count: 0,
+                },
+            ],
+            vec![
+                IndexedEdge {
+                    edge_type: "same_area".to_string(),
+                    from: "src/blast.rs".to_string(),
+                    to: "src/search.rs".to_string(),
+                    confidence: EdgeConfidence::Extracted,
+                    reason: "shared source area src".to_string(),
+                },
+                IndexedEdge {
+                    edge_type: "references".to_string(),
+                    from: "src/related.rs".to_string(),
+                    to: "src/search.rs".to_string(),
+                    confidence: EdgeConfidence::Inferred,
+                    reason: "references crate::search".to_string(),
+                },
+            ],
+            vec![
+                indexed_file("src/search.rs", IndexFileRole::Source),
+                indexed_file("src/blast.rs", IndexFileRole::Source),
+                indexed_file("src/related.rs", IndexFileRole::Source),
+            ],
+        );
+
+        let candidates = rank_with_index("SearchResult", matches, Some(&index), "fresh");
+        assert_eq!(candidates.first().unwrap().path, "src/search.rs");
+        assert!(candidates
+            .first()
+            .unwrap()
+            .evidence
+            .iter()
+            .any(|item| item.evidence_type == "indexed_symbol_definition"));
+    }
+
+    #[test]
+    fn exact_symbol_reference_stays_below_definition_with_index() {
+        let matches = vec![
+            match_item(
+                "src/types.rs",
+                66,
+                "pub struct SearchCoverage {",
+            ),
+            match_item(
+                "src/index.rs",
+                2500,
+                "let coverage = SearchCoverage::new();",
+            ),
+            match_item(
+                "src/symbol.rs",
+                625,
+                "let report = build_report_from_loaded(&repo(), &loaded, \"SearchCoverage\").unwrap();",
+            ),
+        ];
+        let index = repo_index(
+            vec![indexed_symbol("SearchCoverage", "src/types.rs", 66)],
+            vec![
+                IndexedSymbolReference {
+                    from_file: "src/index.rs".to_string(),
+                    symbol_name: "SearchCoverage".to_string(),
+                    target_file: Some("src/types.rs".to_string()),
+                    target_line: Some(66),
+                    line_number: 2500,
+                    confidence: EdgeConfidence::Extracted,
+                    reason: "use statement reference".to_string(),
+                    context: ReferenceContext::Production,
+                    additional_count: 0,
+                },
+                IndexedSymbolReference {
+                    from_file: "src/symbol.rs".to_string(),
+                    symbol_name: "SearchCoverage".to_string(),
+                    target_file: Some("src/types.rs".to_string()),
+                    target_line: Some(66),
+                    line_number: 625,
+                    confidence: EdgeConfidence::Inferred,
+                    reason: "qualified or token reference".to_string(),
+                    context: ReferenceContext::Fixture,
+                    additional_count: 0,
+                },
+            ],
+            vec![
+                IndexedEdge {
+                    edge_type: "imports".to_string(),
+                    from: "src/index.rs".to_string(),
+                    to: "src/types.rs".to_string(),
+                    confidence: EdgeConfidence::Extracted,
+                    reason: "imports crate::types".to_string(),
+                },
+                IndexedEdge {
+                    edge_type: "same_area".to_string(),
+                    from: "src/symbol.rs".to_string(),
+                    to: "src/types.rs".to_string(),
+                    confidence: EdgeConfidence::Extracted,
+                    reason: "shared source area src".to_string(),
+                },
+            ],
+            vec![
+                indexed_file("src/types.rs", IndexFileRole::Source),
+                indexed_file("src/index.rs", IndexFileRole::Source),
+                indexed_file("src/symbol.rs", IndexFileRole::Source),
+            ],
+        );
+
+        let candidates = rank_with_index("SearchCoverage", matches, Some(&index), "fresh");
+        assert_eq!(candidates.first().unwrap().path, "src/types.rs");
+        assert!(candidates
+            .first()
+            .unwrap()
+            .evidence
+            .iter()
+            .any(|item| item.evidence_type == "indexed_symbol_definition"));
+    }
+
+    #[test]
+    fn rg_error_query_still_prefers_source_even_with_index_noise() {
+        let matches = vec![
+            match_item("docs/PROJECT.md", 20, "rg was not found on PATH"),
+            match_item(
+                "src/search.rs",
+                22,
+                "rg was not found on PATH. Install ripgrep and try again.",
+            ),
+            match_item("src/blast.rs", 550, "rg was not found on PATH"),
+        ];
+        let index = repo_index(
+            vec![indexed_symbol("SearchResult", "src/search.rs", 11)],
+            vec![],
+            vec![
+                IndexedEdge {
+                    edge_type: "same_area".to_string(),
+                    from: "src/blast.rs".to_string(),
+                    to: "src/search.rs".to_string(),
+                    confidence: EdgeConfidence::Extracted,
+                    reason: "shared source area src".to_string(),
+                },
+                IndexedEdge {
+                    edge_type: "declares_module".to_string(),
+                    from: "src/main.rs".to_string(),
+                    to: "src/search.rs".to_string(),
+                    confidence: EdgeConfidence::Extracted,
+                    reason: "declares module search".to_string(),
+                },
+            ],
+            vec![
+                indexed_file("src/search.rs", IndexFileRole::Source),
+                indexed_file("src/blast.rs", IndexFileRole::Source),
+                indexed_file("docs/PROJECT.md", IndexFileRole::Doc),
+            ],
+        );
+
+        let candidates = rank_with_index("rg was not found", matches, Some(&index), "fresh");
+        assert_eq!(candidates.first().unwrap().path, "src/search.rs");
     }
 }
