@@ -2,46 +2,76 @@
 
 ## One-line description
 
-Agentgrep is a fast, disposable, evidence-first CLI that helps coding agents understand a codebase: where to look, what depends on what, what might break, and what to run next.
+Agentgrep is a fast local code radar for coding agents.
+
+It is a disposable Rust CLI that helps agents decide where to look, what depends on what, what might break, and what to inspect next.
+
+## Current status
+
+Agentgrep has reached the v0.1-style core milestone.
+
+The current command loop is complete:
+
+```text
+find -> index -> map -> symbol -> related -> blast
+```
+
+Completed project milestones:
+
+- MVP core command loop:
+  - `find`
+  - `index`
+  - `map`
+  - `symbol`
+  - `related`
+  - `blast`
+- Release hardening:
+  - polished GitHub README;
+  - CI for format/check/test;
+  - local smoke script;
+  - cleaner crate metadata.
+- JSON contract stabilization:
+  - `docs/JSON_CONTRACT.md`;
+  - stable top-level JSON shape tests;
+  - documented score, confidence, evidence, index, and risk semantics.
+
+The next project phase is real-repo dogfooding, followed by configuration, retrieval improvements, parser improvements, and optional deeper retrieval experiments.
 
 ## Why this exists
 
-Coding agents spend a large part of their workflow doing the same basic navigation over and over:
+Coding agents spend a large part of their work doing repository navigation:
 
-- finding the likely files for a task;
+- finding likely files for a task;
 - locating symbols, routes, tests, configs, and entrypoints;
 - tracing local dependencies;
 - estimating what else might break;
-- deciding what files to read next;
-- deciding what tests or checks to run.
+- deciding which files to read next;
+- deciding which commands or tests to run next.
 
-Today, agents usually do this with plain shell tools such as `ls`, `find`, `tree`, `rg`, `cat`, and sometimes language-specific commands. These tools are powerful, but they return raw evidence rather than agent-shaped answers.
+Plain tools like `rg`, `find`, `tree`, and `cat` are excellent, but they return raw evidence. Agentgrep sits above those tools and turns evidence into ranked, explainable, agent-shaped output.
 
-Agentgrep exists to sit between raw search and full autonomous reasoning. It should not replace the coding agent. It should give the agent better evidence, ranked results, and small tactical maps so the agent can reason faster with less context.
+Agentgrep should not replace the coding agent. It should give the agent a better code radar with less context waste.
 
 ## Product thesis
 
-The best tool for this problem is not an always-on embedding service, not a vector database, and not a visual graph dashboard.
+The best default tool for this problem is not an always-on embedding service, a vector database, a repo chatbot, or a visual dashboard.
 
-The best tool is:
+The best default tool is:
 
 ```text
-search-first + structure-aware + agent-shaped + disposable
+rg recall floor + lightweight index + deterministic ranking + agent-shaped output
 ```
 
-That means:
+That means Agentgrep should:
 
 - run as a normal CLI command;
-- answer quickly and exit;
-- use deterministic local evidence first;
-- treat `rg` as the recall floor for `find`;
-- shell out to `rg` initially instead of reimplementing search;
-- expose whether `find` searched fully or truncated results;
-- optionally build a fast local index with cheap repository facts;
-- add lightweight structural signals such as symbols, imports, references, file connections, tests, and git history;
-- produce concise output with reasons;
-- support JSON output for coding agents;
-- keep any LLM use optional, bounded, and late-stage.
+- answer and exit;
+- use local deterministic evidence first;
+- keep `rg` as the recall floor;
+- add optional indexed context for symbols, edges, references, and file roles;
+- print concise text for humans;
+- print stable JSON for agents;
+- stay honest about confidence and uncertainty.
 
 ## Who it is for
 
@@ -55,34 +85,56 @@ Secondary user:
 
 Agentgrep should be pleasant for humans, but optimized for agents.
 
-## What Agentgrep should do
+## What Agentgrep should answer
 
-Agentgrep should help answer questions like:
+Agentgrep should help answer:
 
 ```text
 Where is this feature implemented?
 What file should I read first?
 Where is this symbol defined?
-Who calls this function?
-What imports this module?
-What tests are likely relevant?
-If I change this file, what might break?
-What are the key files in this subsystem?
-What command should the agent run next?
+Who uses this symbol?
+What imports or references this module?
+What files are nearby in the graph?
+If I change this file, what might be impacted?
+What should I inspect next?
 ```
 
-## What Agentgrep is not
+## Current command set
 
-Agentgrep is not:
+| Command | Status | Purpose |
+|---|---:|---|
+| `find <query>` | complete | Evidence-first search for likely files. |
+| `index` | complete | Build or inspect the lightweight local repository index. |
+| `map <path>` | complete | Inspect one file with indexed context. |
+| `symbol <name>` | complete | Find definitions and references for a symbol. |
+| `related <path-or-symbol>` | complete | Inspect nearby files, symbols, edges, and references. |
+| `blast <path-or-symbol>` | complete | Estimate conservative likely impact before editing. |
 
-- a semantic search SaaS;
-- a background indexer;
-- a vector database wrapper;
-- a repo chatbot;
-- a dashboard-first graph explorer;
-- an always-on code intelligence server;
-- a replacement for the coding agent;
-- an oracle that claims exact blast radius.
+The normal workflow is:
+
+```bash
+agentgrep find "auth redirect"
+agentgrep index
+agentgrep map src/search.rs
+agentgrep symbol SearchResult
+agentgrep related src/search.rs
+agentgrep blast src/search.rs
+```
+
+## JSON as an agent interface
+
+JSON is a first-class surface for Agentgrep.
+
+Commands that support `--json` should keep stable top-level fields documented in `docs/JSON_CONTRACT.md`.
+
+Important contract rules:
+
+- `score` is response-local and should not be compared across commands or versions;
+- `confidence` is a coarse label: `low`, `medium`, or `high`;
+- `evidence` is explainability metadata and may grow over time;
+- `index_status` describes whether indexed context was fresh, stale, missing, or otherwise limited;
+- `blast` reports conservative likely impact, not guaranteed breakage.
 
 ## Core principles
 
@@ -90,87 +142,81 @@ Agentgrep is not:
 
 Every important result should explain why it was shown.
 
-Bad:
-
-```text
-app/session.py
-```
-
 Good:
 
 ```text
-app/session.py
-Reason: filename match, defines SessionManager, imported by app/router.py, referenced by tests/test_session.py.
+src/search.rs
+Reason: defines SearchResult; references SearchCoverage; declared by main; matched query terms.
 ```
 
-### 2. Deterministic first
+Bad:
 
-Use cheap deterministic signals before using model-based reasoning.
+```text
+src/search.rs
+```
 
-Good first-class signals:
+### 2. `rg` remains the recall floor
+
+Agentgrep does not replace `rg`.
+
+For `find`, raw lexical recall should still start from `rg`. Indexing can improve ranking and add context, but it should not become the only way to discover candidates.
+
+### 3. Index is optional
+
+`agentgrep index` improves ranking, symbols, edges, references, and graph-aware commands.
+
+If no index exists, `find` should still work with `rg` only.
+
+### 4. Deterministic before model-based
+
+Use cheap local signals first:
 
 - `rg` matches;
-- exact phrase matches;
-- path and filename matches;
+- path and filename tokens;
+- snippets and line ranges;
 - symbol definitions;
-- file-level connections;
-- imports and exports;
-- references and calls;
-- nearby tests;
-- git co-change history;
-- churn and risk hotspots;
-- build or package boundaries when available.
+- imports and references;
+- file roles;
+- test/fixture context;
+- graph edges;
+- risk and confidence labels.
 
-### 3. LLM optional and late
+### 5. No hidden runtime cost
 
-The coding agent already has an LLM. Agentgrep should not become a second hidden reasoning agent.
+Agentgrep should remain a disposable CLI.
 
-Acceptable later LLM uses:
+Default usage must not require:
 
-- query expansion;
-- reranking a small candidate set;
-- summarizing already-computed evidence;
-- producing concise next-command suggestions.
+- daemon;
+- file watcher;
+- background indexing service;
+- database server;
+- dashboard;
+- resident LLM process;
+- always-running embedding service.
 
-Unacceptable default LLM uses:
+### 6. Low-token output
 
-- scanning the whole repo in a prompt;
-- inventing architecture without evidence;
-- claiming exact blast radius;
-- replacing deterministic search.
+Agentgrep should return the smallest useful answer:
 
-### 4. Disposable CLI
+- top candidates;
+- concise evidence;
+- short snippets;
+- stable line ranges;
+- confidence labels;
+- next actions.
 
-Normal commands should run, answer, and exit.
+It should not dump entire files or large graphs unless explicitly requested by a future option.
 
-No daemon should be required for MVP.
-No file watcher should be required for MVP.
-No background embedding job should be required for MVP.
+### 7. Honest uncertainty
 
-A later `agentgrep index` command is allowed because it is explicit, local, and exits. It should create a lightweight cache of repository facts, not a resident service.
-
-### 5. Low-token output
-
-Agentgrep should not dump the whole repo into the agent context. It should return the smallest useful answer.
-
-Prefer:
-
-- top 5 to 10 candidates;
-- concise reasons;
-- line ranges;
-- confidence;
-- next commands.
-
-### 6. Honest uncertainty
-
-Blast radius is an estimate. The tool should report confidence and evidence, not certainty.
+Blast radius is an estimate.
 
 Good:
 
 ```text
 Risk: medium
-Confidence: low
-Reason: dynamic imports may hide references; no test map found.
+Reason: 2 production files have direct inbound impact; test/fixture references exist.
 ```
 
 Bad:
@@ -179,205 +225,46 @@ Bad:
 Only these files are impacted.
 ```
 
-## MVP scope
+## Non-goals
 
-The first working version should implement only the smallest useful spine:
+Agentgrep is not:
 
-```bash
-agentgrep find "query"
-agentgrep find "query" --json
-```
+- an LLM wrapper;
+- a repo chatbot;
+- a semantic search SaaS;
+- a vector database wrapper;
+- a background indexer;
+- an always-on code intelligence server;
+- a dashboard-first graph explorer;
+- a database server;
+- a replacement for `rg`;
+- an oracle that claims exact blast radius.
 
-MVP `find` should:
+## Future direction
 
-- run inside a git repo or normal directory;
-- shell out to `rg` if available;
-- search code, docs, configs, and tests;
-- preserve `rg` as the recall floor;
-- run exact-phrase and token search where useful;
-- report candidate and match coverage when results are limited;
-- rank file candidates;
-- include reasons for ranking;
-- show small snippets or line ranges;
-- support stable JSON output;
-- stay fast on small and medium repositories.
+The remaining roadmap is:
 
-## Near-term command roadmap
+1. Dogfood on real repos.
+2. Config file.
+3. Retrieval v2: BM25 / FTS / identifier expansion / graph boosts.
+4. Tree-sitter Rust backend.
+5. Optional hybrid semantic mode behind an explicit flag.
+6. Multi-language support.
+7. Packaging / integrations.
 
-After MVP `find`, add commands in this order:
+The strategic split is:
 
-```bash
-agentgrep index
-agentgrep index --status
-agentgrep map <path>
-agentgrep connections <path>
-agentgrep symbol <name>
-agentgrep related <path|symbol>
-agentgrep blast <path|symbol>
-agentgrep tests <path|symbol>
-agentgrep plan "task prompt"
-```
-
-`index` should not require a budget flag. It should run fast by default, skip expensive work, and report what it indexed. Missing or stale index data must not block `find`; `rg` remains the recall floor.
-
-## Command intent
-
-### `find`
-
-Find likely files or symbols for a query.
-
-Example:
-
-```bash
-agentgrep find "auth redirect"
-```
-
-Should answer:
-
-```text
-Start here:
-1. src/auth/session.ts
-   Reason: path match, symbol match, route proximity.
-2. src/routes/login.ts
-   Reason: contains redirect logic and imports auth session.
-```
-
-### `index`
-
-Build a lightweight local repository-facts cache.
-
-Example:
-
-```bash
-agentgrep index
-```
-
-Should collect cheap deterministic facts such as:
-
-```text
-files, roles, symbols, imports, exports, file connections, tests, package/build hints
-```
-
-It should not create a daemon, watcher, vector database, or embedding store.
-
-### `map`
-
-Show a compact local map around a file or subsystem.
-
-Example:
-
-```bash
-agentgrep map app/meeting_session.py
-```
-
-Should answer:
-
-```text
-File role: meeting lifecycle coordinator
-Symbols: MeetingSession, start, stop
-Imports: audio_recording, storage, schemas
-Imported by: routers/meeting_sessions.py
-Calls/references: storage.write_event, audio_recording.start
-Likely tests: tests/test_meeting_sessions.py
-```
-
-### `connections`
-
-Show direct file-level connections.
-
-Example:
-
-```bash
-agentgrep connections app/meeting_session.py
-```
-
-Should answer:
-
-```text
-Outgoing:
-- app/audio_recording.py — imported
-- app/storage.py — imported / referenced
-
-Incoming:
-- app/routers/meeting_sessions.py — imports target file
-- tests/test_meeting_sessions.py — tests target behavior
-```
-
-### `symbol`
-
-Find definitions and references for a symbol.
-
-Example:
-
-```bash
-agentgrep symbol MeetingSession
-```
-
-### `blast`
-
-Estimate risk and likely impacted files/tests.
-
-Example:
-
-```bash
-agentgrep blast app/meeting_session.py
-```
-
-### `tests`
-
-Suggest relevant tests to run first.
-
-Example:
-
-```bash
-agentgrep tests app/audio_recording.py
-```
+- BM25/FTS belongs in the default lightweight retrieval path later.
+- Hybrid semantic retrieval is future opt-in only.
+- LLM integration stays out of core.
 
 ## Success criteria
 
-Agentgrep is successful if it improves coding-agent workflows compared with plain `rg`.
+Agentgrep is successful if a coding agent can use it to:
 
-The important metrics are:
-
-- p50 and p95 latency;
-- top-k file localization;
-- precision of suggested files;
-- false-positive burden;
-- usefulness of reasons;
-- JSON schema stability;
-- downstream agent success;
-- token savings versus raw search output.
-
-## Non-goals for early versions
-
-Do not build these until the core CLI proves value:
-
-- embeddings;
-- vector database;
-- daemon;
-- watcher;
-- web UI;
-- graph visualization;
-- hosted service;
-- cloud LLM dependency;
-- repo-wide AI summaries;
-- automatic code edits.
-
-## Long-term vision
-
-Agentgrep should become the standard local codebase radar for coding agents.
-
-The mature version should help an agent move through this workflow quickly:
-
-```text
-classify task
--> generate search seeds
--> find likely edit locus with rg-backed recall
--> use lightweight index facts when available
--> map local structure and file connections
--> estimate blast radius
--> select tests/checks
--> return concise evidence
-```
-
-It should feel like giving the agent better eyes, not giving it another brain.
+- find the right first file faster than plain `rg`;
+- avoid reading irrelevant files;
+- understand local file/symbol context without a full repo dump;
+- estimate change impact before editing;
+- consume stable JSON with minimal glue code;
+- run everything locally without a resident service.

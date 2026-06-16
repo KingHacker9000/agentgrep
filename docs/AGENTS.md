@@ -1,428 +1,376 @@
-# AGENTS.md
+# Agent Guide for Agentgrep
 
-## Purpose of this file
+This guide explains how coding agents should use Agentgrep.
 
-This file gives coding agents clear instructions for working on Agentgrep.
+Agentgrep is a fast local code radar. It gives agents ranked evidence, file context, symbol context, related files, and conservative impact estimates without requiring a daemon, LLM, database server, or background service.
 
-Agentgrep is a fast, disposable, evidence-first CLI for codebase navigation, search, mapping, and blast-radius estimation. It is designed for coding agents first and humans second.
+## Remaining milestone checklist
 
-Before making changes, read:
+- [x] Release hardening
+- [x] JSON contract stabilization
+- [ ] Dogfood on real repos
+- [ ] Config file
+- [ ] Retrieval v2: BM25 / FTS / identifier expansion / graph boosts
+- [ ] Tree-sitter Rust backend
+- [ ] Optional hybrid semantic mode behind a flag
+- [ ] Multi-language support
+- [ ] Packaging / integrations
 
-```text
-PROJECT.md
-ARCHITECTURE.md
-AGENTS.md
-```
+## Agent usage principles
 
-## Core rule
-
-Do not overbuild.
-
-Agentgrep should start as a small Rust CLI that shells out to `rg`, ranks results with evidence, supports text and JSON output, and exits.
-
-The first goal is not to build a full intelligence system. The first goal is to prove that agent-shaped output beats plain `rg` while preserving `rg` as the recall floor.
-
-## What to build first
-
-Implement only the MVP spine unless explicitly asked otherwise:
-
-```bash
-agentgrep find "query"
-agentgrep find "query" --json
-```
-
-The MVP should:
-
-- parse CLI args;
-- detect repo root;
-- call `rg`;
-- run exact phrase and token searches where useful;
-- collect and merge matches;
-- group matches by file;
-- score/rank files;
-- attach evidence;
-- expose search coverage when output is limited;
-- print concise text output;
-- support JSON output;
-- handle missing `rg` cleanly.
-
-## What not to build yet
-
-Do not add any of these in the MVP:
-
-- embeddings;
-- vector database;
-- daemon;
-- file watcher;
-- background indexer;
-- local model server;
-- cloud LLM calls;
-- dashboard;
-- graph visualization;
-- persistent repo database;
-- automatic code editing;
-- huge architecture summary generator;
-- complicated plugin system;
-- full tree-sitter integration before `find` works.
-
-After `find` quality is stable, an explicit `agentgrep index` command is allowed. It must run, write a lightweight local cache, report status, and exit. Do not add a budget flag. Do not make it required for `find`.
-
-If a task seems to require one of these, pause and choose the smallest deterministic alternative.
-
-## Implementation philosophy
-
-### Prefer deterministic evidence
-
-Every result should have reasons.
-
-Good:
-
-```text
-src/auth/session.ts
-Why: filename match, rg match on redirect, path suggests auth area.
-```
-
-Bad:
-
-```text
-src/auth/session.ts
-Why: AI thinks it is relevant.
-```
-
-### Prefer small commands
-
-Commands should be composable and easy for agents to call.
-
-Good:
-
-```bash
-agentgrep find "auth redirect"
-agentgrep map src/auth/session.ts
-agentgrep blast src/auth/session.ts
-```
-
-Bad:
-
-```bash
-agentgrep analyze-everything --deep --semantic --dashboard
-```
-
-### Prefer low-token output
-
-The CLI should not dump huge context by default.
-
-Default output should usually include:
-
-- top candidates;
-- score or confidence;
-- short reasons;
-- line references;
-- next suggested commands.
-
-### Prefer JSON stability
-
-Every command that agents may use should eventually support `--json`.
-
-Do not break JSON schemas casually.
-
-## Expected coding style
-
-Use simple Rust.
+### 1. Use Agentgrep before broad file reading
 
 Prefer:
 
-- clear modules;
-- small functions;
-- explicit structs;
-- readable scoring logic;
-- simple errors;
-- limited dependencies.
-
-Avoid:
-
-- clever abstractions;
-- generic frameworks;
-- unnecessary async;
-- premature plugin systems;
-- hidden global state;
-- long-running background processes.
-
-## Suggested initial Rust modules
-
-Start with:
-
-```text
-src/main.rs      entrypoint
-src/cli.rs       clap args and command definitions
-src/repo.rs      repo root detection
-src/search.rs    rg invocation and match parsing
-src/rank.rs      grouping and scoring
-src/output.rs    text/json formatting
-src/types.rs     shared structs
+```bash
+agentgrep find "query"
 ```
 
-Do not create future modules until they are needed.
+before reading large parts of the repo.
 
-Future modules may include:
+Agentgrep should help localize likely files and reduce context waste.
 
-```text
-src/index/
-src/symbols/
-src/graph/
-src/git/
-src/blast/
-src/tests/
-src/llm/
-```
+### 2. Use `rg`-backed search as the first radar pass
 
-## MVP output expectations
+`find` works even without an index.
 
-For:
+Good first commands:
 
 ```bash
 agentgrep find "auth redirect"
+agentgrep find "SearchResult"
+agentgrep find "rg was not found"
 ```
 
-Prefer output like:
-
-```text
-Top candidates:
-1. src/auth/session.ts    score 0.86
-   Lines: 18, 44, 91
-   Why: path contains auth; matched redirect; multiple query terms found.
-
-2. src/routes/login.ts    score 0.71
-   Lines: 12, 39
-   Why: route-like path; matched redirect.
-
-Next:
-- agentgrep map src/auth/session.ts
-- agentgrep tests src/auth/session.ts
-```
-
-For:
+Use `--json` if your agent can parse structured output:
 
 ```bash
-agentgrep find "auth redirect" --json
+agentgrep find "SearchResult" --json
 ```
 
-Prefer output like:
+### 3. Build the index when structural context matters
 
-```json
-{
-  "query": "auth redirect",
-  "repo_root": "/repo",
-  "repo_rev": "abc123",
-  "latency_ms": 120,
-  "candidates": [
-    {
-      "path": "src/auth/session.ts",
-      "kind": "file",
-      "score": 0.86,
-      "confidence": "medium",
-      "line_ranges": [{"start": 18, "end": 18}],
-      "evidence": [
-        {"type": "path_match", "detail": "path contains auth"},
-        {"type": "rg_match", "detail": "matched redirect on line 18"}
-      ]
-    }
-  ],
-  "next_commands": [
-    "agentgrep map src/auth/session.ts"
-  ]
-}
-```
-
-## Recall guidance
-
-`find` should use `rg` as its recall floor.
-
-Good behavior:
-
-```text
-rg found 42 matches across 8 files; Agentgrep shows the top 8 ranked candidates.
-```
-
-Bad behavior:
-
-```text
-Agentgrep silently drops raw rg candidates and gives no coverage signal.
-```
-
-Do not add a separate raw fallback command unless explicitly requested. Agents can call `rg` directly. Agentgrep's job is to make `find` safer by reporting coverage and limits.
-
-## Scoring guidance
-
-Keep scoring simple and explainable.
-
-Useful early signals:
-
-```text
-filename contains query term
-path contains query term
-file contains multiple query terms
-file has multiple matches
-match appears in likely symbol line
-path is test-related
-path is config-related
-path is doc-related
-path is generated/vendor/build output
-```
-
-Do not introduce ML scoring in MVP.
-
-Do not introduce embeddings in MVP.
-
-## Dependency guidance
-
-Acceptable early dependencies:
-
-```text
-clap
-serde
-serde_json
-anyhow
-```
-
-Possibly later:
-
-```text
-tree-sitter
-git2
-ignore
-grep-searcher
-```
-
-The first index should stay file-backed and simple. Do not add Neo4j, FalkorDB, Qdrant, SQLite, Tantivy, or an embedding/vector store unless explicitly requested.
-
-Do not add LLM or vector database dependencies unless explicitly requested.
-
-## Testing guidance
-
-Add lightweight tests only where they protect core behavior.
-
-Good test targets:
-
-- scoring function;
-- result grouping;
-- query term extraction;
-- JSON serialization;
-- repo root fallback behavior.
-
-Do not build a large test harness before the CLI works.
-
-When reporting back, include manual commands the user can run, such as:
+Run:
 
 ```bash
-cargo fmt
-cargo check
-cargo test
-cargo run -- find "auth redirect"
-cargo run -- find "auth redirect" --json
+agentgrep index
 ```
 
-If manual command output may be long, redirect it into files under `manual-test/` instead of printing it all in the terminal report.
+when you need:
 
-Example PowerShell:
+- file maps;
+- symbol lookup;
+- references;
+- related files;
+- blast estimates;
+- improved `find` ranking/context.
 
-```powershell
-mkdir manual-test -Force
-cargo run -- find "auth redirect" > manual-test/find-auth-redirect.txt
-cargo run -- find "auth redirect" --json > manual-test/find-auth-redirect.json
+Check freshness with:
+
+```bash
+agentgrep index --status
 ```
 
-## Agent workflow for this repo
+If the index is missing or stale, rebuild it.
 
-When asked to implement something:
+### 4. Follow the normal workflow
 
-1. Re-read the relevant docs.
-2. Identify whether the request belongs to MVP or later roadmap.
-3. Prefer the smallest useful implementation.
-4. Avoid adding infrastructure unless necessary.
-5. Keep output agent-friendly.
-6. Keep behavior explainable.
-7. Report changed files and reasoning clearly.
+Recommended workflow:
 
-## How to handle ambiguity
-
-If the user asks for a large feature, choose the smallest version that preserves the project direction.
+```text
+find -> index -> map -> symbol -> related -> blast
+```
 
 Example:
 
-User asks:
-
-```text
-Add semantic search.
+```bash
+agentgrep find "auth redirect"
+agentgrep index
+agentgrep map src/search.rs
+agentgrep symbol SearchResult
+agentgrep related src/search.rs
+agentgrep blast src/search.rs
 ```
 
-Better response:
+### 5. Prefer JSON for automated use
+
+Agentgrep's JSON contract is documented in:
 
 ```text
-Implemented deterministic query expansion and ranking hooks first. Did not add embeddings or a vector DB because the project constraints prefer disposable commands and evidence-first search.
+docs/JSON_CONTRACT.md
 ```
 
-Do not silently add heavyweight infrastructure.
+Use JSON for agent planning or tool chaining:
 
-## Feature priority order
+```bash
+agentgrep find "SearchResult" --json
+agentgrep map src/search.rs --json
+agentgrep symbol SearchResult --json
+agentgrep related src/search.rs --json
+agentgrep blast src/search.rs --json
+```
 
-Build in this order:
+Agents should rely on stable top-level fields, not exact score values or every nested reason string.
 
-1. `find` text output.
-2. `find --json`.
-3. better ranking and evidence.
-4. recall coverage metadata for `find`.
-5. `index`, `index --status`, and `index --clear` with a lightweight local cache.
-6. file connection edges in the index.
-7. `map <path>` using indexed facts and lightweight parsing.
-8. `connections <path>`.
-9. tree-sitter symbols.
-10. `symbol <name>`.
-11. git history signals.
-12. `related <path>`.
-13. `blast <path|symbol>`.
-14. `tests <path|symbol>`.
-15. optional LLM query expansion/reranking.
+## Command guide
 
-## Definition of done for MVP
+### `find <query>`
 
-MVP is done when:
+Use when:
 
-- the project builds as a Rust CLI;
-- `agentgrep find "query"` works;
-- `agentgrep find "query" --json` works;
-- missing `rg` gives a clear error;
-- results are grouped by file;
-- results include evidence;
-- output is concise;
-- docs still match behavior.
+- starting a task;
+- localizing a feature;
+- searching for an error message;
+- looking for a symbol or concept;
+- deciding which file to inspect first.
 
-## Reporting format for coding agents
+Example:
 
-When finishing a task, report:
+```bash
+agentgrep find "missing ripgrep"
+```
+
+Use output:
+
+- read top candidates first;
+- inspect line ranges/snippets;
+- use `Why` evidence to understand ranking;
+- follow `Next` suggestions.
+
+Notes:
+
+- `find` uses `rg` as the recall floor;
+- indexed context can improve ranking if available;
+- scores are only relative inside one response.
+
+### `index`
+
+Use when:
+
+- structural commands are needed;
+- JSON should include richer graph context;
+- `find` needs stronger symbol/edge signals.
+
+Examples:
+
+```bash
+agentgrep index
+agentgrep index --status
+agentgrep index --clear
+```
+
+Notes:
+
+- the index is local and disposable;
+- it is stored under the git area when possible;
+- it can be rebuilt at any time.
+
+### `map <path>`
+
+Use when:
+
+- you already have a candidate file;
+- you need its symbols;
+- you need incoming/outgoing edges;
+- you want quick local context before opening the file.
+
+Example:
+
+```bash
+agentgrep map src/search.rs
+```
+
+Agent behavior:
+
+- use symbols to pick important entrypoints;
+- use incoming edges to find callers/importers;
+- use outgoing edges to find dependencies;
+- use `next_actions` to decide follow-up commands.
+
+### `symbol <name>`
+
+Use when:
+
+- looking for definitions;
+- checking where a type/function is used;
+- determining whether a symbol is production or mostly test/fixture referenced.
+
+Example:
+
+```bash
+agentgrep symbol SearchResult
+```
+
+Match modes:
+
+- exact;
+- case-insensitive exact;
+- substring fallback.
+
+Agent behavior:
+
+- prefer exact matches;
+- inspect `used_by` context;
+- treat test/fixture references differently from production references.
+
+### `related <file-or-symbol>`
+
+Use when:
+
+- you know the target but need neighborhood context;
+- you want nearby files before editing;
+- you need files connected by imports, references, symbols, or same-area edges.
+
+Example:
+
+```bash
+agentgrep related src/search.rs
+```
+
+Agent behavior:
+
+- inspect high-confidence related files first;
+- treat `same_area` as weak evidence;
+- prefer imports/references/symbol references over broad path proximity.
+
+### `blast <file-or-symbol>`
+
+Use before editing.
+
+Example:
+
+```bash
+agentgrep blast src/search.rs
+```
+
+Blast answers:
 
 ```text
-Changed files:
-- path/to/file.rs — what changed
-
-Behavior:
-- what command now works
-
-Not included:
-- what was intentionally not built
-
-Manual checks:
-- cargo fmt
-- cargo check
-- cargo test
-- cargo run -- find "example"
+What might be impacted if this changes?
 ```
 
-Keep reports concise.
+Important:
 
-## Final reminder
+- blast is conservative likely impact;
+- it is not a guarantee of breakage;
+- production impact should matter more than test/fixture-only evidence;
+- same-area-only impact is weak.
 
-Agentgrep is not trying to become an AI coding agent.
+Agent behavior:
 
-Agentgrep gives coding agents better local evidence.
+- inspect `risk_level` and `risk_reasons`;
+- inspect high-confidence impacted files;
+- follow `suggested_inspection_order`;
+- do not claim that files outside the list are safe.
 
-Build the radar, not the pilot.
+## JSON consumption rules
+
+Agents should treat these as stable in v0.1:
+
+- top-level report fields documented in `docs/JSON_CONTRACT.md`;
+- `path` and `query` fields;
+- `index_status` fields;
+- top-level arrays such as `candidates`, `matches`, `related_files`, `impacted_files`, and `next_actions`.
+
+Agents should treat these as best-effort:
+
+- exact scores;
+- exact reason strings;
+- exact evidence ordering;
+- exact line-range sets;
+- exact snippet choice;
+- complete reference coverage.
+
+Do not compare scores across commands or versions.
+
+Do not assume every possible reference is found.
+
+## Confidence and risk interpretation
+
+### Confidence
+
+Confidence values:
+
+```text
+low | medium | high
+```
+
+They are coarse labels, not probabilities.
+
+Use confidence to decide inspection order, not correctness.
+
+### Risk level
+
+Blast risk values should be treated as conservative estimates.
+
+Use them to decide how much inspection is needed, not to prove safety.
+
+## When not to use Agentgrep
+
+Do not use Agentgrep as a replacement for:
+
+- reading the final source file before editing;
+- running tests;
+- compiler or type-checker diagnostics;
+- language-server completions;
+- exact dependency analysis;
+- security review.
+
+Agentgrep is a radar, not proof.
+
+## Recommended agent loop
+
+For a code-change task:
+
+```text
+1. agentgrep find "task terms"
+2. agentgrep index, if not fresh
+3. agentgrep map <top-file>
+4. agentgrep symbol <main-symbol>
+5. agentgrep related <file-or-symbol>
+6. agentgrep blast <file-or-symbol>
+7. read/edit files
+8. run tests/checks
+```
+
+For a bug/error task:
+
+```text
+1. agentgrep find "exact error message"
+2. inspect top source result
+3. agentgrep blast <file>
+4. inspect production impacted files
+5. edit
+6. run targeted tests/checks
+```
+
+For a refactor:
+
+```text
+1. agentgrep symbol <symbol>
+2. agentgrep related <symbol>
+3. agentgrep blast <symbol>
+4. inspect production references first
+5. edit carefully
+6. run wider tests/checks
+```
+
+## Future agent-facing improvements
+
+Planned future work:
+
+- config file for output limits and excludes;
+- BM25/FTS lexical retrieval for stronger default `find`;
+- Tree-sitter Rust backend for cleaner symbols/references;
+- optional hybrid semantic mode behind an explicit flag;
+- multi-language support;
+- packaging/integrations.
+
+Not planned for core:
+
+- hidden LLM calls;
+- always-running embeddings;
+- daemon;
+- watcher;
+- dashboard;
+- database server.

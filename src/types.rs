@@ -371,6 +371,56 @@ pub struct SearchMatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::{EdgeConfidence, ReferenceContext};
+    use serde_json::Value;
+
+    fn sample_indexed_symbol(name: &str, file_path: &str) -> IndexedSymbol {
+        IndexedSymbol {
+            name: name.to_string(),
+            kind: SymbolKind::Function,
+            file_path: file_path.to_string(),
+            line_number: 12,
+            visibility: Visibility::Public,
+            signature: Some(format!("pub fn {name}()")),
+        }
+    }
+
+    fn sample_reference(
+        symbol_name: &str,
+        from_file: &str,
+        target_file: &str,
+    ) -> crate::index::IndexedSymbolReference {
+        crate::index::IndexedSymbolReference {
+            from_file: from_file.to_string(),
+            symbol_name: symbol_name.to_string(),
+            target_file: Some(target_file.to_string()),
+            target_line: Some(12),
+            line_number: 3,
+            confidence: EdgeConfidence::Extracted,
+            reason: "use statement reference".to_string(),
+            context: ReferenceContext::Production,
+            additional_count: 0,
+        }
+    }
+
+    fn sample_edge(edge_type: &str, from: &str, to: &str) -> MapEdge {
+        MapEdge {
+            edge_type: edge_type.to_string(),
+            from: from.to_string(),
+            to: to.to_string(),
+            confidence: "extracted".to_string(),
+            reason: format!("{edge_type} edge"),
+        }
+    }
+
+    fn assert_top_level_fields(json: &Value, fields: &[&str]) {
+        for field in fields {
+            assert!(
+                json.get(field).is_some(),
+                "expected top-level field `{field}` to exist in {json}"
+            );
+        }
+    }
 
     #[test]
     fn coverage_serializes_with_expected_fields() {
@@ -385,5 +435,212 @@ mod tests {
         assert_eq!(json["candidate_limit"], 8);
         assert_eq!(json["index_used"], false);
         assert_eq!(json["index_status"], "not_applicable");
+    }
+
+    #[test]
+    fn find_report_serializes_stable_top_level_fields() {
+        let report = FindReport {
+            query: "SearchResult".to_string(),
+            repo_root: "C:/repo".to_string(),
+            repo_rev: Some("abc".to_string()),
+            latency_ms: 42,
+            coverage: SearchCoverage::new(5, 2, 20).finalize(2, 8),
+            candidates: vec![FileCandidate {
+                path: "src/search.rs".to_string(),
+                kind: "file".to_string(),
+                role: "source".to_string(),
+                score: 0.9,
+                confidence: Confidence::High,
+                line_ranges: vec![LineRange { start: 12, end: 12 }],
+                snippets: vec![Snippet {
+                    line_number: 12,
+                    text: "pub struct SearchResult".to_string(),
+                }],
+                evidence: vec![Evidence {
+                    evidence_type: "rg_match".to_string(),
+                    detail: "matched SearchResult".to_string(),
+                }],
+            }],
+            next_actions: vec!["agentgrep map src/search.rs".to_string()],
+        };
+
+        let json = serde_json::to_value(&report).unwrap();
+        assert_top_level_fields(
+            &json,
+            &[
+                "query",
+                "repo_root",
+                "repo_rev",
+                "latency_ms",
+                "coverage",
+                "candidates",
+                "next_actions",
+            ],
+        );
+    }
+
+    #[test]
+    fn map_report_serializes_stable_top_level_fields() {
+        let report = MapReport {
+            path: "src/search.rs".to_string(),
+            role: "source".to_string(),
+            index_status: "fresh".to_string(),
+            index_path: "C:/repo/.agentgrep/index.json".to_string(),
+            repo_rev: Some("abc".to_string()),
+            size_bytes: Some(1024),
+            modified_unix: Some(1_700_000_000),
+            content_hash: Some("deadbeef".to_string()),
+            symbols: vec![sample_indexed_symbol("SearchResult", "src/search.rs")],
+            outgoing_edges: vec![sample_edge("imports", "src/search.rs", "src/types.rs")],
+            incoming_edges: vec![],
+            connection_counts: ConnectionCounts {
+                outgoing_total: 1,
+                incoming_total: 0,
+                outgoing_by_type: BTreeMap::from([(String::from("imports"), 1)]),
+                incoming_by_type: BTreeMap::new(),
+            },
+            next_actions: vec!["open src/search.rs".to_string()],
+        };
+
+        let json = serde_json::to_value(&report).unwrap();
+        assert_top_level_fields(
+            &json,
+            &[
+                "path",
+                "role",
+                "index_status",
+                "index_path",
+                "repo_rev",
+                "size_bytes",
+                "modified_unix",
+                "content_hash",
+                "symbols",
+                "outgoing_edges",
+                "incoming_edges",
+                "connection_counts",
+                "next_actions",
+            ],
+        );
+    }
+
+    #[test]
+    fn symbol_report_serializes_stable_top_level_fields() {
+        let report = SymbolReport {
+            query: "SearchResult".to_string(),
+            index_status: "fresh".to_string(),
+            match_mode: SymbolMatchMode::Exact,
+            matches: vec![SymbolMatch {
+                symbol: sample_indexed_symbol("SearchResult", "src/search.rs"),
+                file_role: "source".to_string(),
+                used_by: vec![sample_reference(
+                    "SearchResult",
+                    "src/main.rs",
+                    "src/search.rs",
+                )],
+                outgoing_edges: vec![sample_edge("imports", "src/search.rs", "src/types.rs")],
+                incoming_edges: vec![],
+                next_actions: vec!["open src/search.rs".to_string()],
+            }],
+            next_actions: vec!["agentgrep map src/search.rs".to_string()],
+        };
+
+        let json = serde_json::to_value(&report).unwrap();
+        assert_top_level_fields(
+            &json,
+            &[
+                "query",
+                "index_status",
+                "match_mode",
+                "matches",
+                "next_actions",
+            ],
+        );
+    }
+
+    #[test]
+    fn related_report_serializes_stable_top_level_fields() {
+        let report = RelatedReport {
+            query: "src/search.rs".to_string(),
+            mode: RelatedMode::File,
+            index_status: "fresh".to_string(),
+            match_mode: None,
+            target_file: Some("src/search.rs".to_string()),
+            target_role: Some("source".to_string()),
+            symbol_matches: vec![],
+            related_files: vec![RelatedFile {
+                path: "src/types.rs".to_string(),
+                role: "source".to_string(),
+                score: 1.0,
+                confidence: Confidence::High,
+                reasons: vec!["imports".to_string()],
+            }],
+            edges: vec![sample_edge("imports", "src/search.rs", "src/types.rs")],
+            symbols: vec![sample_indexed_symbol("SearchResult", "src/search.rs")],
+            references: vec![sample_reference(
+                "SearchResult",
+                "src/main.rs",
+                "src/search.rs",
+            )],
+            next_actions: vec!["agentgrep blast src/search.rs".to_string()],
+        };
+
+        let json = serde_json::to_value(&report).unwrap();
+        assert_top_level_fields(
+            &json,
+            &[
+                "query",
+                "mode",
+                "index_status",
+                "related_files",
+                "edges",
+                "symbols",
+                "references",
+                "next_actions",
+            ],
+        );
+    }
+
+    #[test]
+    fn blast_report_serializes_stable_top_level_fields() {
+        let report = BlastReport {
+            query: "src/search.rs".to_string(),
+            mode: BlastMode::File,
+            index_status: "fresh".to_string(),
+            risk_level: BlastRiskLevel::Medium,
+            risk_reasons: vec!["imports are present".to_string()],
+            impacted_files: vec![BlastImpactedFile {
+                path: "src/types.rs".to_string(),
+                role: "source".to_string(),
+                score: 1.0,
+                confidence: Confidence::High,
+                context: BlastImpactContext::Production,
+                reasons: vec!["imports".to_string()],
+            }],
+            affected_symbols: vec![sample_indexed_symbol("SearchResult", "src/search.rs")],
+            references: vec![sample_reference(
+                "SearchResult",
+                "src/main.rs",
+                "src/search.rs",
+            )],
+            suggested_inspection_order: vec!["src/search.rs".to_string()],
+            next_actions: vec!["agentgrep related src/search.rs".to_string()],
+        };
+
+        let json = serde_json::to_value(&report).unwrap();
+        assert_top_level_fields(
+            &json,
+            &[
+                "query",
+                "mode",
+                "index_status",
+                "risk_level",
+                "risk_reasons",
+                "impacted_files",
+                "affected_symbols",
+                "references",
+                "suggested_inspection_order",
+                "next_actions",
+            ],
+        );
     }
 }

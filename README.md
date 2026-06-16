@@ -101,6 +101,8 @@ agentgrep blast src/search.rs --json
 
 JSON is intended for agents and scripts. Text output stays concise for terminal use.
 
+JSON contract details live in [docs/JSON_CONTRACT.md](./docs/JSON_CONTRACT.md).
+
 ## Index behavior
 
 `agentgrep index` is optional.

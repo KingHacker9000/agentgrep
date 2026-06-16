@@ -2,641 +2,398 @@
 
 ## Architecture summary
 
-Agentgrep is a single local CLI binary that runs a command, gathers cheap repository evidence, ranks the result, prints concise output, and exits.
+Agentgrep is a single local Rust CLI binary.
 
-The default architecture is:
+It runs a command, gathers cheap repository evidence, ranks or organizes that evidence, prints text or JSON, and exits.
+
+Default architecture:
 
 ```text
-Rust CLI
+CLI command
   -> repo discovery
-  -> query parsing
-  -> rg-backed recall search
-  -> optional lightweight index facts
-  -> scoring/ranking
+  -> optional index load/status check
+  -> rg-backed lexical recall where relevant
+  -> deterministic evidence extraction
+  -> ranking / graph / risk model
   -> text or JSON formatter
   -> exit
 ```
 
-The long-term architecture is:
-
-```text
-rg recall floor + lightweight index + tree-sitter + file connection graph + git history + optional test map + optional LLM reranker
-```
-
-The core product is not raw search. The core product is evidence-backed ranking and agent-shaped output.
+Agentgrep is not a daemon, server, dashboard, database, watcher, or LLM wrapper.
 
 ## Runtime model
-
-Agentgrep should be disposable.
 
 Each command should:
 
 1. start quickly;
-2. inspect the current repository or supplied path;
-3. gather only the evidence needed for that command;
-4. print a concise result;
-5. exit.
+2. inspect the current repository;
+3. use the local index if useful and available;
+4. gather only command-relevant evidence;
+5. return concise text or stable JSON;
+6. exit.
 
-MVP must not require:
+Default runtime must not require:
 
 - daemon;
 - file watcher;
 - background indexer;
-- vector database;
 - resident LLM process;
+- vector database service;
+- database server;
 - web dashboard.
 
-A later explicit `agentgrep index` command is allowed. It must run, write a small local cache, report what it found, and exit. It must not become a daemon, watcher, or required service.
+## Current command architecture
 
-## Initial implementation strategy
+| Command | Backend style | Index required? | JSON? | Purpose |
+|---|---|---:|---:|---|
+| `find <query>` | `rg` recall + ranking + optional index metadata | no | yes | Rank likely files for a query. |
+| `index` | local file/symbol/edge/reference extraction | no | no | Build or inspect the lightweight index. |
+| `map <path>` | index-backed file context | yes | yes | Show symbols and edges around one file. |
+| `symbol <name>` | index-backed symbol lookup | yes | yes | Show definitions, uses, and nearby file context. |
+| `related <query>` | index-backed graph neighborhood | yes | yes | Show nearby files, edges, symbols, and references. |
+| `blast <query>` | index-backed risk heuristic | yes | yes | Estimate conservative likely impact. |
 
-Start from scratch as a Rust CLI, but do not reimplement ripgrep at first.
+Commands that require index context should fail usefully when the index is missing, with a next action such as `agentgrep index`.
 
-Use `rg` as the search backend.
+## `rg` recall floor
 
-```text
-agentgrep = orchestrator and ranking layer
-rg        = recall floor and lexical search backend
-index     = optional repository-facts cache
-git       = history backend
-tree-sitter later = symbol/AST backend
-```
-
-Why not fork `rg`:
-
-- `rg` already solves raw fast recursive search extremely well;
-- Agentgrep's value is not being a faster grep;
-- forking `rg` would force the project to live inside a search-engine codebase;
-- the product needs workflow commands, scoring, evidence, JSON, maps, and blast-radius estimates.
-
-If shelling out to `rg` becomes limiting later, Agentgrep can replace specific pieces with Rust crates from the same ecosystem, such as ignore/walkdir, grep-searcher, regex-automata, or similar libraries.
-
-## MVP command set
-
-The first version should implement:
-
-```bash
-agentgrep find "query"
-agentgrep find "query" --json
-```
-
-Do not implement `map`, `symbol`, `blast`, `tests`, embeddings, LLM calls, or a dashboard in the first pass unless explicitly requested.
-
-The next architectural step after `find` quality is not a raw `rg` fallback command. Agents can call `rg` directly. The next step is a recall contract inside `find` and then an explicit lightweight `index` command.
-
-## Planned command set
-
-Commands should remain small and composable.
-
-| Command | Purpose |
-|---|---|
-| `find <query>` | Rank likely files/symbols for a task or concept while preserving `rg` recall evidence. |
-| `index` | Build a fast local repository-facts cache. |
-| `index --status` | Show whether the index exists, what it contains, and whether it matches the current repo revision. |
-| `index --clear` | Remove the local Agentgrep index cache. |
-| `map <path|symbol>` | Show local structure around a file or symbol. |
-| `connections <path>` | Show direct file-level incoming/outgoing connections. |
-| `symbol <name>` | Find definitions and references. |
-| `trace <path|symbol>` | Follow dependency edges. |
-| `blast <path|symbol|description>` | Estimate impacted files/tests and risk. |
-| `tests <path|symbol>` | Suggest tests to run first. |
-| `related <path|symbol>` | Show git co-change and neighborhood hints. |
-| `plan <task>` | Suggest next Agentgrep commands for a coding task. |
-
-## Data flow for `find`
+For `find`, `rg` is the recall floor.
 
 ```text
-User/agent query
-  -> parse query
-  -> preserve exact phrase
-  -> derive seed terms
-  -> run rg exact-phrase pass when useful
-  -> run rg token/term pass
-  -> collect and merge matches
-  -> group by file
-  -> add optional index facts when available
-  -> score files
-  -> attach evidence and coverage metadata
-  -> print top candidates
+query
+  -> build lexical patterns
+  -> run rg
+  -> group raw matches by file
+  -> attach snippets and line ranges
+  -> rank candidates
+  -> optionally enrich with index signals
 ```
 
-Example:
+The index can improve ranking and evidence, but it should not replace raw search as the default candidate source.
 
-```bash
-agentgrep find "auth redirect"
-```
+This keeps `find` useful even before indexing.
 
-Possible internal steps:
+## Local index
 
-```text
-query terms: auth, redirect
-rg search: auth|redirect
-candidate files: grouped by path
-extra signals: filename match, test path, config path, docs path
-score: weighted heuristic
-output: top files with reasons
-```
+The index is optional and local.
 
-## Recall contract for `find`
-
-`find` is not a replacement for raw `rg`; it is ranked `rg` plus structure.
-
-The contract is:
-
-```text
-rg remains the recall floor.
-Agentgrep may reorder, group, and explain results.
-Agentgrep must not silently hide that rg found more candidates than it displayed.
-```
-
-Text and JSON output should eventually expose:
-
-```text
-raw_rg_match_count
-raw_rg_candidate_file_count
-shown_candidate_count
-result_limit
-limited true/false
-index_used true/false
-index_status missing|fresh|stale|partial
-```
-
-If output is limited, `find` should say so clearly. Agents can then refine the query or call raw `rg` themselves.
-
-## Lightweight index
-
-After `find` is reliable, Agentgrep should support:
-
-```bash
-agentgrep index
-agentgrep index --status
-agentgrep index --clear
-```
-
-There should be no `--budget` flag. The command should be fast by default by doing only cheap deterministic work. On very large repositories it may gracefully produce a partial index and report what was skipped.
-
-The index should be stored locally, preferably outside tracked source files, for example:
+Preferred storage path:
 
 ```text
 .git/agentgrep/index.json
 ```
 
-If `.git` is unavailable, use a local cache directory and report its path.
-
-The index should contain repository facts, not AI summaries:
+Fallback storage path:
 
 ```text
-files
-file roles
-symbol definitions
-imports and exports
-file-level connections
-likely tests
-package/build hints
-git revision and content hashes
+.agentgrep/index.json
 ```
 
-Missing or stale index data must never block `find`; the command falls back to rg-only ranking.
+The index currently stores:
 
-## File connection graph
+- repo revision when available;
+- file entries;
+- file roles;
+- content hashes;
+- symbols;
+- symbol references;
+- file edges;
+- role and symbol statistics;
+- index status metadata.
 
-Agentgrep should build a lightweight file-level graph before attempting deep semantic analysis.
+The index is a lightweight cache, not a source of truth. It can be rebuilt.
 
-Useful edge types:
+## Index status
 
-```text
-contains_symbol
-imports_file
-imports_symbol
-exports_symbol
-calls_symbol
-references_symbol
-tested_by
-configured_by
-co_changed_with
-```
+Commands should expose index state where relevant.
 
-Each edge should carry:
+Common states:
 
-```text
-source file
-target file or symbol
-relation
-evidence line if available
-confidence: extracted|inferred|ambiguous
-```
+| Status | Meaning |
+|---|---|
+| `fresh` | Index exists and matches the current repo revision. |
+| `stale` | Index exists but repo revision differs. |
+| `missing` | No index was found. |
+| `unverifiable` | Index exists but freshness could not be proven. |
+| `not_applicable` | Command did not use index context. |
 
-Prefer `extracted` edges from deterministic syntax/import analysis. Use `inferred` only for weaker evidence such as name matching or git co-change.
+`find --json` also exposes `coverage.index_used` so agents can tell whether indexed context affected the result.
 
 ## Evidence model
 
-Agentgrep should track why each candidate was selected.
+Agentgrep tracks why a result appears.
 
-Evidence types may include:
+Evidence may include:
 
-```text
-rg_match
-path_match
-filename_match
-symbol_match
-import_edge
-reference_edge
-test_proximity
-git_cochange
-churn
-config_match
-doc_match
-```
+- `rg_match`;
+- `filename_token_match`;
+- `path_match`;
+- `snippet_term_match`;
+- `exact_phrase_match`;
+- `near_phrase_match`;
+- `source_role`;
+- `fixture_like_match`;
+- `indexed_symbol_definition`;
+- `indexed_symbol_reference`;
+- `indexed_edge`.
 
-MVP only needs a few:
+Evidence is explainability metadata. It may grow over time. Agents should not assume the set of evidence types is closed.
 
-```text
-rg_match
-exact_phrase_match
-near_phrase_match
-path_match
-filename_match
-test_proximity
-config_match
-doc_match
-coverage_summary
-```
+## Scoring and confidence
 
-Indexed stages may add:
+Scores are command-local ranking values.
 
-```text
-symbol_match
-file_connection
-import_edge
-export_edge
-reference_edge
-call_edge
-tested_by
-```
+Rules:
 
-## Scoring model v0
+- scores are only meaningful within one response;
+- scores are not comparable across commands;
+- scores are not guaranteed stable across versions;
+- exact symbol definitions should outrank broad helper/test noise;
+- production evidence should outrank test/fixture evidence;
+- `same_area` should be weak supporting evidence, not a dominant signal.
 
-The first scoring model should be simple, explainable, and monotonic.
-
-Example scoring signals:
+Confidence is a coarse label:
 
 ```text
-+ exact query term in filename
-+ exact query term in path
-+ multiple query terms in same file
-+ match appears in symbol-looking line
-+ match appears in route/config/test file
-+ file is not ignored by gitignore
-- generated/minified/vendor file
-- lockfile unless query directly targets dependency data
+low | medium | high
 ```
 
-The score should not pretend to be semantic truth. It is just a ranking heuristic.
+Confidence is not a probability. It is a user-facing summary of signal quality.
 
-Every score should be explainable through evidence.
+## File roles
 
-## Output model
+Agentgrep classifies files into practical roles such as:
 
-Default output should be concise text.
+- source;
+- doc;
+- config;
+- lockfile;
+- test/fixture context;
+- other.
 
-Example:
+Roles affect ranking and output framing. They are heuristics, not a formal language model.
+
+## Symbol model
+
+Symbols currently include lightweight Rust-oriented extraction for:
+
+- modules;
+- structs;
+- enums;
+- impl blocks;
+- functions;
+- constants.
+
+Symbol records include:
+
+- name;
+- kind;
+- file path;
+- line number;
+- visibility;
+- signature.
+
+The current symbol extraction is heuristic. Tree-sitter is a future index-time parser backend, not a full rewrite.
+
+## Edge model
+
+File edges represent local relationships.
+
+Current edge types include:
+
+- `declares_module`;
+- `imports`;
+- `references`;
+- `same_area`;
+- test/fixture-related relationships where available.
+
+Edges include:
+
+- source file;
+- target file;
+- edge type;
+- confidence;
+- reason.
+
+`same_area` is intentionally weak. It helps show neighborhood but should not dominate ranking or risk.
+
+## Command data flows
+
+### `find`
 
 ```text
-agentgrep find "auth redirect"
-
-Top candidates:
-1. src/auth/session.ts    score 0.86
-   Lines: 18, 44, 91
-   Why: filename match: auth; matched redirect; imported by login route.
-
-2. src/routes/login.ts    score 0.73
-   Lines: 12, 39
-   Why: path suggests route; matched redirect; imports auth session.
-
-Next:
-- agentgrep map src/auth/session.ts
-- agentgrep tests src/auth/session.ts
+query
+  -> rg recall
+  -> grouped matches
+  -> snippets and line ranges
+  -> optional index metadata
+  -> ranked FileCandidate list
+  -> FindReport
 ```
 
-JSON output should be stable and machine-readable.
+`find` must work without an index.
 
-Example schema:
-
-```json
-{
-  "query": "auth redirect",
-  "repo_root": "/path/to/repo",
-  "repo_rev": "abc123",
-  "latency_ms": 123,
-  "candidates": [
-    {
-      "path": "src/auth/session.ts",
-      "kind": "file",
-      "score": 0.86,
-      "confidence": "medium",
-      "line_ranges": [
-        {"start": 18, "end": 18},
-        {"start": 44, "end": 44}
-      ],
-      "evidence": [
-        {"type": "filename_match", "detail": "path contains 'auth'"},
-        {"type": "rg_match", "detail": "matched 'redirect' on line 44"}
-      ]
-    }
-  ],
-  "next_commands": [
-    "agentgrep map src/auth/session.ts",
-    "agentgrep tests src/auth/session.ts"
-  ]
-}
-```
-
-## Repository discovery
-
-Agentgrep should detect the repository root using:
-
-1. `git rev-parse --show-toplevel` if available;
-2. current working directory fallback.
-
-It should respect ignored files by default through `rg` behavior.
-
-Add explicit flags later if needed:
-
-```bash
-agentgrep find "query" --root path/to/repo
-agentgrep find "query" --no-ignore
-```
-
-## Search backend
-
-MVP should shell out to `rg`.
-
-Suggested behavior:
-
-- require `rg` if available;
-- produce a clear error if `rg` is missing;
-- later optionally provide a slower fallback;
-- capture line number, path, and snippet;
-- avoid huge output by limiting matches per file and total files.
-
-Possible `rg` options to evaluate:
-
-```bash
-rg --line-number --column --smart-case --hidden --glob '!{.git,target,node_modules,dist,build}' <query>
-```
-
-Be careful with `--hidden`. Default behavior should probably respect common ignores and avoid hidden/vendor/build folders unless explicitly requested.
-
-## Structural layer later
-
-After MVP `find` and the recall contract, add the lightweight `index` command.
-
-Then add tree-sitter parsing.
-
-Tree-sitter should provide:
-
-- function names;
-- class names;
-- method names;
-- import statements;
-- export statements;
-- route-ish declarations where language queries support them;
-- symbol line ranges.
-
-The first structural feature should probably be `map <path>`, not global repo indexing.
-
-`map <path>` can parse one file on demand and return local structure quickly.
-
-## Import/reference graph later
-
-The first graph should be cheap, local, and file-centered.
-
-Start with direct file connections:
+### `index`
 
 ```text
-file A imports file B
-file C imports file A
-file T tests file A
-file A defines symbol X
-file B calls or references symbol X
+repo root
+  -> walk files
+  -> classify roles
+  -> extract symbols
+  -> extract references
+  -> extract file edges
+  -> compute stats and hashes
+  -> write index.json
 ```
 
-Then add symbol-level and reference-level edges if exact language tooling or simple search makes them reliable.
+The index can be cleared and rebuilt.
 
-Do not build a full graph database for MVP. The index should be a compact file on disk, not Neo4j/FalkorDB/Qdrant.
-
-Store only facts that improve `find`, `map`, `connections`, `related`, `blast`, or `tests`.
-
-## Git history signals later
-
-Git can provide useful risk and relationship signals without a watcher.
-
-Potential signals:
-
-- recently changed files;
-- files that often co-change;
-- churn/hotspot files;
-- files changed in current branch;
-- likely ownership areas.
-
-Example later command:
-
-```bash
-agentgrep related app/meeting_session.py
-```
-
-Potential output:
+### `map`
 
 ```text
-Historically related:
-- app/routers/meeting_sessions.py — co-changed 8 times
-- app/schemas.py — co-changed 4 times
-- tests/test_meeting_sessions.py — co-changed 3 times
+file path
+  -> load index
+  -> resolve file entry
+  -> collect symbols
+  -> collect incoming/outgoing edges
+  -> summarize connection counts
+  -> MapReport
 ```
 
-## Blast-radius design later
-
-Blast radius should be an estimate with confidence.
-
-Potential inputs:
-
-- direct references;
-- imports and reverse imports;
-- public API or signature change hints;
-- likely tests;
-- git co-change;
-- churn;
-- build target fan-out if available.
-
-Potential output:
+### `symbol`
 
 ```text
-Risk: medium
-Confidence: medium
-
-Likely impacted:
-1. app/routers/meeting_sessions.py
-   Evidence: imports target file; calls MeetingSession.start.
-2. tests/test_meeting_sessions.py
-   Evidence: test proximity and symbol match.
-
-Blind spots:
-- dynamic imports not analyzed
-- no coverage map found
+symbol query
+  -> load index
+  -> exact / case-insensitive / substring lookup
+  -> collect definitions
+  -> collect grouped references
+  -> collect nearby file edges
+  -> SymbolReport
 ```
 
-Never claim exact impact.
-
-## Optional LLM integration later
-
-LLM use must be optional and bounded.
-
-Possible flags:
-
-```bash
-agentgrep find "query" --llm
-agentgrep find "query" --rerank
-agentgrep blast app/session.py --summarize
-```
-
-Allowed LLM tasks:
-
-- expand vague natural language into search terms;
-- rerank top 10 to 30 deterministic candidates;
-- summarize evidence;
-- suggest next commands.
-
-Disallowed default LLM tasks:
-
-- repo-wide semantic indexing;
-- hidden background inference;
-- whole-repo architecture claims;
-- invented blast radius;
-- sending repo contents to cloud without explicit opt-in.
-
-## Performance goals
-
-Normal commands should target:
+### `related`
 
 ```text
-small repo: p50 under 500 ms
-medium repo: p50 under 2 seconds
-large repo: graceful degradation with limits
+file or symbol query
+  -> load index
+  -> resolve mode
+  -> score nearby files
+  -> collect edges, symbols, references
+  -> RelatedReport
 ```
 
-These are goals, not guarantees.
-
-The CLI should expose latency in JSON output.
-
-## Error handling
-
-Errors should be direct and actionable.
-
-Examples:
+### `blast`
 
 ```text
-Error: rg was not found. Install ripgrep or run with --backend internal once supported.
+file or symbol query
+  -> load index
+  -> resolve mode
+  -> separate production vs test/fixture evidence
+  -> estimate risk level
+  -> list impacted files and suggested inspection order
+  -> BlastReport
 ```
+
+Blast is conservative likely impact. It is not guaranteed breakage.
+
+## JSON contract
+
+JSON output is a first-class integration surface for agents.
+
+The current v0.1 contract is documented in:
 
 ```text
-Error: no readable files found under /path/to/repo.
+docs/JSON_CONTRACT.md
 ```
 
-```text
-Warning: not inside a git repository; git history signals disabled.
-```
+Stable top-level fields are guarded by lightweight serialization-shape tests. Nested details such as scores, evidence details, and reason lists are best-effort and may evolve.
 
-Warnings should not block commands unless the missing dependency is required.
+## Current completed architecture milestones
 
-## Suggested Rust project structure
+Completed:
 
-Initial structure:
+- `rg`-backed `find`;
+- coverage metadata;
+- optional lightweight index;
+- file map command;
+- symbol lookup command;
+- symbol-reference precision pass;
+- related-neighborhood command;
+- blast-risk command;
+- index-aware `find` ranking;
+- release hardening;
+- JSON contract docs/tests.
 
-```text
-agentgrep/
-  Cargo.toml
-  src/
-    main.rs
-    cli.rs
-    repo.rs
-    search.rs
-    rank.rs
-    output.rs
-    types.rs
-  PROJECT.md
-  ARCHITECTURE.md
-  AGENTS.md
-```
+## Future architecture layers
 
-Later structure:
+### Config file
 
-```text
-src/
-  index/
-  symbols/
-  graph/
-  git/
-  blast/
-  tests/
-  llm/
-```
+A small `.agentgrep.toml` should eventually control:
 
-Do not create the later modules until needed.
+- output limits;
+- excluded paths;
+- test/fixture patterns;
+- ranking preferences.
 
-## Dependency preferences
+### Retrieval v2
 
-Reasonable early Rust crates:
+BM25 / FTS / identifier expansion / symbol graph boosts should become the default lightweight intelligence upgrade.
 
-```text
-clap        CLI parsing
-serde       JSON serialization
-serde_json  JSON output
-anyhow      error handling
-thiserror   typed errors if needed
-```
+This layer should remain:
 
-Avoid heavy dependencies unless clearly justified.
+- local;
+- deterministic;
+- no daemon;
+- no model;
+- no resident service.
 
-Do not add tree-sitter dependencies until implementing `map` or `symbol`.
+### Tree-sitter backend
 
-Do not add LLM dependencies in MVP.
+Tree-sitter should be introduced as a Rust-first index-time parser backend.
 
-## Testing strategy
+Rules:
 
-Prefer small tests around pure logic:
+- no UX change;
+- heuristics remain fallback;
+- no daemon;
+- no schema explosion;
+- improve symbols, imports, references, and fixture/comment skipping.
 
-- query parsing;
-- result grouping;
-- scoring;
-- JSON serialization.
+### Optional hybrid semantic mode
 
-Avoid creating a large fake test framework before the CLI spine works.
+Hybrid semantic retrieval may be useful later, but only behind an explicit flag.
 
-Keep tests lightweight and fast.
+Rules:
 
-## Design constraint summary
+- disabled by default;
+- local-only;
+- no always-running model;
+- no required GPU;
+- no server;
+- semantic candidates must be labeled;
+- deterministic evidence remains primary.
 
-Agentgrep should be:
+### Multi-language support
 
-```text
-local
-fast
-disposable
-CLI-native
-evidence-backed
-agent-shaped
-structure-aware
-LLM-optional
-```
+Multi-language support should come after the retrieval and parser foundations are stable.
 
-Agentgrep should not be:
+Likely order:
 
-```text
-always-on
-embedding-first
-dashboard-first
-daemon-first
-cloud-dependent
-graph-database-first
-LLM-as-oracle
-```
+1. TypeScript / JavaScript;
+2. Python;
+3. Go;
+4. Markdown/docs cross-links.
+
+## Architecture non-goals
+
+Agentgrep should not become:
+
+- a language server;
+- a compiler frontend;
+- a repo chatbot;
+- a vector DB client;
+- a background indexing system;
+- a dashboard app;
+- a semantic search engine by default;
+- an LLM reasoning agent.
