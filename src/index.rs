@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -463,7 +464,7 @@ pub fn likely_test_targets(
 fn build_index(repo: &RepoInfo) -> Result<RepoIndex> {
     let mut files = Vec::new();
     let mut source_texts = BTreeMap::new();
-    collect_files(&repo.root, &repo.root, &mut files, &mut source_texts)?;
+    collect_files(&repo.root, &mut files, &mut source_texts)?;
     files.sort_by(|left, right| left.path.cmp(&right.path));
 
     let source_paths: Vec<String> = files
@@ -1881,36 +1882,35 @@ fn count_roles(files: &[IndexedFile]) -> BTreeMap<FileRole, usize> {
 
 fn collect_files(
     root: &Path,
-    current: &Path,
     out: &mut Vec<IndexedFile>,
     source_texts: &mut BTreeMap<String, String>,
 ) -> Result<()> {
-    for entry in fs::read_dir(current)
-        .with_context(|| format!("failed to read directory {}", display_path(current)))?
-    {
+    let walker = WalkBuilder::new(root)
+        .standard_filters(true)
+        .add_custom_ignore_filename(".rgignore")
+        .build();
+
+    for entry in walker {
         let entry = entry?;
         let path = entry.path();
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if path.is_dir() {
-            if should_skip_dir(&name) {
-                continue;
-            }
-            collect_files(root, &path, out, source_texts)?;
+        if !entry
+            .file_type()
+            .map(|value| value.is_file())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if should_skip_file(path) {
             continue;
         }
 
-        if !path.is_file() || should_skip_file(&path, &name) {
-            continue;
-        }
-
-        let relative = path.strip_prefix(root).unwrap_or(&path);
+        let relative = path.strip_prefix(root).unwrap_or(path);
         let relative_path = display_path(relative);
         let role = classify_role(&relative_path);
         let metadata = entry.metadata()?;
         let size_bytes = Some(metadata.len());
         let modified_unix = metadata.modified().ok().and_then(system_time_to_unix);
-        let content_hash = maybe_hash_file(&path, metadata.len())?;
+        let content_hash = maybe_hash_file(path, metadata.len())?;
 
         out.push(IndexedFile {
             path: relative_path.clone(),
@@ -1921,8 +1921,8 @@ fn collect_files(
         });
 
         if path.extension().and_then(|value| value.to_str()) == Some("rs") {
-            let contents = fs::read_to_string(&path)
-                .with_context(|| format!("failed to read source file {}", display_path(&path)))?;
+            let contents = fs::read_to_string(path)
+                .with_context(|| format!("failed to read source file {}", display_path(path)))?;
             source_texts.insert(relative_path, contents);
         }
     }
@@ -2033,15 +2033,12 @@ fn unix_now() -> u64 {
         .as_secs()
 }
 
-fn should_skip_dir(name: &str) -> bool {
-    matches!(
-        name,
-        ".git" | "target" | "node_modules" | "dist" | "build" | "manual-test" | ".agentgrep"
-    )
-}
-
-fn should_skip_file(path: &Path, name: &str) -> bool {
-    let lower = name.to_lowercase();
+fn should_skip_file(path: &Path) -> bool {
+    let lower = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
     lower.ends_with(".exe")
         || lower.ends_with(".dll")
         || lower.ends_with(".pdb")
@@ -2195,6 +2192,18 @@ mod tests {
         ))
     }
 
+    fn write_file(root: &Path, relative: &str, contents: &str) {
+        let path = root.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, contents).unwrap();
+    }
+
+    fn indexed_paths(index: &RepoIndex) -> HashSet<String> {
+        index.files.iter().map(|file| file.path.clone()).collect()
+    }
+
     #[test]
     fn index_path_prefers_git_dir_when_present() {
         let repo = RepoInfo {
@@ -2230,6 +2239,47 @@ mod tests {
         assert_eq!(classify_role("docs/README.md"), FileRole::Doc);
         assert_eq!(classify_role("Cargo.toml"), FileRole::Config);
         assert_eq!(classify_role("Cargo.lock"), FileRole::Lockfile);
+    }
+
+    #[test]
+    fn skips_gitignored_directories_during_indexing() {
+        let base = unique_temp_dir("gitignore-index");
+        fs::create_dir_all(base.join(".git")).unwrap();
+        write_file(&base, ".gitignore", "target/\n");
+        write_file(&base, "src/visible.rs", "pub fn visible() {}\n");
+        write_file(&base, "target/ignored.rs", "pub fn ignored() {}\n");
+
+        let repo = RepoInfo {
+            root: base.clone(),
+            rev: Some("abc".to_string()),
+            git_dir: Some(base.join(".git")),
+        };
+
+        let index = build_index(&repo).unwrap();
+        let paths = indexed_paths(&index);
+        assert!(paths.contains("src/visible.rs"));
+        assert!(!paths.contains("target/ignored.rs"));
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn respects_rgignore_for_nested_ignored_dirs() {
+        let base = unique_temp_dir("rgignore-index");
+        write_file(&base, "nested/.rgignore", "ignored/\n");
+        write_file(&base, "nested/src/keep.rs", "pub fn keep() {}\n");
+        write_file(&base, "nested/ignored/skip.rs", "pub fn skip() {}\n");
+
+        let repo = RepoInfo {
+            root: base.clone(),
+            rev: Some("abc".to_string()),
+            git_dir: None,
+        };
+
+        let index = build_index(&repo).unwrap();
+        let paths = indexed_paths(&index);
+        assert!(paths.contains("nested/src/keep.rs"));
+        assert!(!paths.contains("nested/ignored/skip.rs"));
+        let _ = fs::remove_dir_all(base);
     }
 
     #[test]
