@@ -2,10 +2,11 @@
 name = "agentgrep"
 version = "0.1.0"
 edition = "2021"
+description = "fast local code radar for coding agents"
+readme = "README.md"
 
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-
