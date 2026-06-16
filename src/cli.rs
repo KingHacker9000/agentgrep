@@ -1,7 +1,13 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(name = "agentgrep", version, about = "Evidence-first codebase search")]
+#[command(
+    name = "agentgrep",
+    version,
+    about = "Evidence-first codebase search and navigation",
+    long_about = "Agentgrep uses rg as its recall floor. The index is optional and improves ranking and context when present. No LLM, daemon, watcher, or background service is required.",
+    after_help = "Workflow:\n  find -> index -> map -> symbol -> related -> blast"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -9,53 +15,57 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    /// Rank likely files for a query.
+    /// Evidence-first search for likely files.
     Find {
         /// Query to search for.
         query: String,
-        /// Emit stable JSON instead of text.
-        #[arg(long)]
+        /// Write stable JSON instead of text.
+        #[arg(long, help = "Write stable JSON instead of text.")]
         json: bool,
     },
     /// Build or inspect the lightweight repository index.
     Index {
         /// Show index status instead of rebuilding.
-        #[arg(long, conflicts_with = "clear")]
+        #[arg(
+            long,
+            conflicts_with = "clear",
+            help = "Show index status instead of rebuilding."
+        )]
         status: bool,
         /// Clear the stored index.
-        #[arg(long, conflicts_with = "status")]
+        #[arg(long, conflicts_with = "status", help = "Clear the stored index.")]
         clear: bool,
     },
-    /// Show a compact file card from the index.
+    /// Inspect one file with indexed context.
     Map {
         /// Path relative to the repo root.
         path: String,
-        /// Emit stable JSON instead of text.
-        #[arg(long)]
+        /// Write stable JSON instead of text.
+        #[arg(long, help = "Write stable JSON instead of text.")]
         json: bool,
     },
-    /// Locate a symbol in the indexed source files.
+    /// Find definitions and references for a symbol.
     Symbol {
         /// Symbol name to search for.
         name: String,
-        /// Emit stable JSON instead of text.
-        #[arg(long)]
+        /// Write stable JSON instead of text.
+        #[arg(long, help = "Write stable JSON instead of text.")]
         json: bool,
     },
-    /// Show related files, symbols, and references.
+    /// Inspect nearby files, symbols, and references.
     Related {
         /// File path or symbol query to analyze.
         query: String,
-        /// Emit stable JSON instead of text.
-        #[arg(long)]
+        /// Write stable JSON instead of text.
+        #[arg(long, help = "Write stable JSON instead of text.")]
         json: bool,
     },
-    /// Estimate likely impact for a file or symbol.
+    /// Estimate conservative impact for a file or symbol.
     Blast {
         /// File path or symbol query to analyze.
         query: String,
-        /// Emit stable JSON instead of text.
-        #[arg(long)]
+        /// Write stable JSON instead of text.
+        #[arg(long, help = "Write stable JSON instead of text.")]
         json: bool,
     },
 }
