@@ -12,7 +12,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::parser::extracted::{dedup_edges, dedup_symbols};
+use crate::parser::extracted::{dedup_edges, dedup_symbols, ImportBinding};
 use crate::repo::{display_path, RepoInfo};
 use crate::text::shorten_snippet;
 use crate::types::{IndexedSymbol, SymbolKind, Visibility};
@@ -479,14 +479,21 @@ fn build_index(repo: &RepoInfo) -> Result<RepoIndex> {
         crate::parser::combine_with_rust_fallback(parsed_facts, &files, &source_texts);
     let mut symbols = parsed_facts.symbols;
     let mut edges = parsed_facts.edges;
+    let import_bindings = parsed_facts.symbol_references;
     dedup_symbols(&mut symbols);
     dedup_edges(&mut edges);
-    let symbol_references = build_rust_symbol_references(&files, &source_texts, &symbols);
+    let mut symbol_references = build_rust_symbol_references(&files, &source_texts, &symbols);
+    symbol_references.extend(build_import_binding_symbol_references(
+        &import_bindings,
+        &symbols,
+    ));
+    dedup_symbol_references(&mut symbol_references);
     let symbol_reference_count = symbol_references.len();
     edges.extend(build_same_area_edges(&files));
     edges.extend(build_test_edges(&files, &source_paths));
     edges.extend(build_config_edges(&files, &source_paths));
     dedup_edges(&mut edges);
+    let connection_count = edges.len();
 
     let file_count = files.len();
     let role_counts = count_roles(&files);
@@ -502,14 +509,14 @@ fn build_index(repo: &RepoInfo) -> Result<RepoIndex> {
         files,
         symbols,
         symbol_references,
-        edges: edges.clone(),
+        edges,
         stats: IndexStats {
             file_count,
             role_counts,
             symbol_count,
             symbol_kind_counts,
             symbol_reference_count,
-            connection_count: edges.len(),
+            connection_count,
         },
     })
 }
@@ -615,6 +622,66 @@ fn count_symbol_kinds(symbols: &[IndexedSymbol]) -> BTreeMap<SymbolKind, usize> 
         *counts.entry(symbol.kind.clone()).or_insert(0) += 1;
     }
     counts
+}
+
+fn build_import_binding_symbol_references(
+    bindings: &[ImportBinding],
+    symbols: &[IndexedSymbol],
+) -> Vec<IndexedSymbolReference> {
+    let mut definition_lines: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for symbol in symbols {
+        definition_lines
+            .entry((symbol.file_path.clone(), symbol.name.clone()))
+            .and_modify(|line| {
+                if symbol.line_number < *line {
+                    *line = symbol.line_number;
+                }
+            })
+            .or_insert(symbol.line_number);
+    }
+
+    let mut references = Vec::new();
+    for binding in bindings {
+        let Some(target_file) = binding.target_file.as_ref() else {
+            continue;
+        };
+        let Some(target_line) = definition_lines
+            .get(&(target_file.clone(), binding.symbol_name.clone()))
+            .copied()
+        else {
+            continue;
+        };
+        references.push(binding.clone().into_reference(Some(target_line)));
+    }
+
+    references.sort_by(|left, right| {
+        left.from_file
+            .cmp(&right.from_file)
+            .then_with(|| left.line_number.cmp(&right.line_number))
+            .then_with(|| left.symbol_name.cmp(&right.symbol_name))
+            .then_with(|| left.target_file.cmp(&right.target_file))
+            .then_with(|| left.target_line.cmp(&right.target_line))
+            .then_with(|| left.reason.cmp(&right.reason))
+    });
+
+    references
+}
+
+fn dedup_symbol_references(references: &mut Vec<IndexedSymbolReference>) {
+    let mut seen = BTreeSet::new();
+    references.retain(|reference| {
+        seen.insert((
+            reference.from_file.clone(),
+            reference.symbol_name.clone(),
+            reference.target_file.clone(),
+            reference.target_line,
+            reference.line_number,
+            reference.confidence.clone(),
+            reference.reason.clone(),
+            reference.context,
+            reference.additional_count,
+        ))
+    });
 }
 
 fn build_rust_symbol_references(
@@ -2265,6 +2332,37 @@ mod tests {
         let paths = indexed_paths(&index);
         assert!(paths.contains("src/visible.rs"));
         assert!(!paths.contains("target/ignored.rs"));
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn builds_symbol_references_for_direct_import_bindings() {
+        let base = unique_temp_dir("import-bindings");
+        fs::create_dir_all(base.join(".git")).unwrap();
+        write_file(&base, "app/llm_client.py", "class LLMClient:\n    pass\n");
+        write_file(
+            &base,
+            "app/meeting_session.py",
+            "from app.llm_client import LLMClient\n\nasync def start_session():\n    return LLMClient()\n",
+        );
+
+        let repo = RepoInfo {
+            root: base.clone(),
+            rev: Some("abc".to_string()),
+            git_dir: Some(base.join(".git")),
+        };
+
+        let index = build_index(&repo).unwrap();
+        assert!(index
+            .symbols
+            .iter()
+            .any(|symbol| symbol.name == "LLMClient" && symbol.file_path == "app/llm_client.py"));
+        assert!(index.symbol_references.iter().any(|reference| {
+            reference.from_file == "app/meeting_session.py"
+                && reference.symbol_name == "LLMClient"
+                && reference.target_file.as_deref() == Some("app/llm_client.py")
+        }));
+        assert!(index.stats.symbol_reference_count > 0);
         let _ = fs::remove_dir_all(base);
     }
 

@@ -3,7 +3,7 @@ use tree_sitter::Node;
 use crate::index::EdgeConfidence;
 use crate::types::{SymbolKind, Visibility};
 
-use super::extracted::{edge, file_facts, symbol, FileFacts};
+use super::extracted::{edge, file_facts, symbol, FileFacts, ImportBinding};
 use super::language::{normalize_path, parent_dir, parse_source, RepoLookup};
 use super::symbol_signature;
 
@@ -61,21 +61,14 @@ fn walk_python_node(
                 ));
 
                 for imported_name in python_import_names(node, source) {
-                    if let Some(target) = resolve_python_import_name(
-                        file_path,
-                        &module_text,
-                        &target,
-                        &imported_name,
-                        lookup,
-                    ) {
-                        facts.edges.push(edge(
-                            "imports",
-                            file_path,
-                            &target,
-                            EdgeConfidence::Inferred,
-                            format!("imports {}", normalize_path(&target)),
-                        ));
-                    }
+                    facts.symbol_references.push(ImportBinding {
+                        from_file: file_path.to_string(),
+                        symbol_name: imported_name,
+                        target_file: Some(target.clone()),
+                        line_number: node.start_position().row + 1,
+                        confidence: EdgeConfidence::Extracted,
+                        reason: format!("direct import binding from {}", normalize_path(&target)),
+                    });
                 }
             } else if module_text.chars().all(|ch| ch == '.') {
                 for imported_name in python_import_names(node, source) {
@@ -226,26 +219,6 @@ fn resolve_python_module(
     lookup.resolve_candidates(candidates)
 }
 
-fn resolve_python_import_name(
-    file_path: &str,
-    module_text: &str,
-    resolved_module: &str,
-    imported_name: &str,
-    lookup: &RepoLookup,
-) -> Option<String> {
-    let imported_name = imported_name.trim();
-    if imported_name.is_empty() || imported_name == "*" {
-        return None;
-    }
-
-    let base_dir = if module_text.starts_with('.') {
-        parent_dir(file_path)
-    } else {
-        parent_dir(resolved_module)
-    };
-    resolve_python_name_at_base(&base_dir, imported_name, lookup)
-}
-
 fn resolve_relative_python_name(
     file_path: &str,
     module_text: &str,
@@ -339,7 +312,9 @@ mod tests {
     fn extracts_python_symbols_and_import_edges() {
         let source = r#"
 import app.models
+from app.llm_client import LLMClient
 from .schemas import Foo
+from .meeting_session import start_session as launch_session
 
 class SessionLiveStateLoop:
     pass
@@ -350,7 +325,12 @@ async def start_session():
         let facts = extract_file_facts(
             "app/meeting_session.py",
             source,
-            &lookup(&["app/meeting_session.py", "app/models.py", "app/schemas.py"]),
+            &lookup(&[
+                "app/meeting_session.py",
+                "app/models.py",
+                "app/schemas.py",
+                "app/llm_client.py",
+            ]),
         );
         assert!(facts
             .symbols
@@ -368,5 +348,13 @@ async def start_session():
             .edges
             .iter()
             .any(|edge| edge.to == "app/schemas.py" && edge.edge_type == "imports"));
+        assert!(facts.symbol_references.iter().any(|binding| {
+            binding.symbol_name == "LLMClient"
+                && binding.target_file.as_deref() == Some("app/llm_client.py")
+        }));
+        assert!(facts.symbol_references.iter().any(|binding| {
+            binding.symbol_name == "start_session"
+                && binding.target_file.as_deref() == Some("app/meeting_session.py")
+        }));
     }
 }

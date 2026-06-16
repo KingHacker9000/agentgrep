@@ -127,6 +127,7 @@ fn build_candidate(
     let mut evidence = Vec::new();
     let mut score = 0.0;
     let mut matched_terms = BTreeSet::new();
+    let mut path_shape_tier = 0usize;
 
     for token_match in collect_token_matches(profile, &path_tokens, &file_name_tokens, &matches) {
         score += token_match.score;
@@ -134,6 +135,14 @@ fn build_candidate(
             evidence.push(evidence_item);
         }
         matched_terms.insert(token_match.term);
+    }
+
+    if let Some((boost, tier, evidence_item)) =
+        filename_shape_boost(profile, &path_tokens, &file_name_tokens)
+    {
+        score += boost;
+        evidence.push(evidence_item);
+        path_shape_tier = path_shape_tier.max(tier);
     }
 
     if let Some(cluster) = best_exact_cluster {
@@ -169,9 +178,9 @@ fn build_candidate(
 
     apply_role_weight(&role, profile, &mut score, &mut evidence);
 
-    let mut index_tier = 0usize;
+    let mut index_tier = path_shape_tier;
     if let Some(index) = index {
-        index_tier = apply_index_evidence(
+        index_tier = index_tier.max(apply_index_evidence(
             &normalized_path,
             &role,
             profile,
@@ -179,7 +188,7 @@ fn build_candidate(
             index_status,
             &mut score,
             &mut evidence,
-        );
+        ));
     }
 
     let snippets = build_snippets(&clusters, profile);
@@ -252,8 +261,12 @@ fn collect_token_matches(
     let mut results = Vec::new();
 
     for term in &profile.terms {
-        let filename_hit = file_name_tokens.iter().any(|token| token == term);
-        let path_hit = path_tokens.iter().any(|token| token == term);
+        let filename_hit = file_name_tokens
+            .iter()
+            .any(|token| token_matches_term(term, token));
+        let path_hit = path_tokens
+            .iter()
+            .any(|token| token_matches_term(term, token));
         let snippet_hit = matches
             .iter()
             .any(|item| normalize_phrase(&item.snippet).contains(term));
@@ -291,6 +304,115 @@ fn collect_token_matches(
     }
 
     results
+}
+
+fn filename_shape_boost(
+    profile: &QueryProfile,
+    path_tokens: &[String],
+    file_name_tokens: &[String],
+) -> Option<(f64, usize, Evidence)> {
+    if profile.terms.is_empty() {
+        return None;
+    }
+
+    let exact_file_match = profile
+        .terms
+        .iter()
+        .all(|term| file_name_tokens.iter().any(|token| token == term));
+    let fuzzy_file_match = profile.terms.iter().all(|term| {
+        file_name_tokens
+            .iter()
+            .any(|token| token_matches_term(term, token))
+    });
+
+    let exact_path_match = profile
+        .terms
+        .iter()
+        .all(|term| path_tokens.iter().any(|token| token == term));
+    let fuzzy_path_match = profile.terms.iter().all(|term| {
+        path_tokens
+            .iter()
+            .any(|token| token_matches_term(term, token))
+    });
+
+    if exact_file_match {
+        let boost = if profile.identifier_like { 0.42 } else { 0.62 };
+        return Some((
+            boost,
+            5,
+            Evidence {
+                evidence_type: "filename_shape_match".to_string(),
+                detail: format!("filename stem matches '{}'", profile.normalized_phrase),
+            },
+        ));
+    }
+
+    if fuzzy_file_match {
+        let boost = if profile.identifier_like { 0.34 } else { 0.50 };
+        return Some((
+            boost,
+            5,
+            Evidence {
+                evidence_type: "filename_shape_match".to_string(),
+                detail: format!(
+                    "filename stem closely matches '{}'",
+                    profile.normalized_phrase
+                ),
+            },
+        ));
+    }
+
+    if exact_path_match {
+        let boost = if profile.identifier_like { 0.22 } else { 0.32 };
+        return Some((
+            boost,
+            4,
+            Evidence {
+                evidence_type: "path_shape_match".to_string(),
+                detail: format!("path tokens match '{}'", profile.normalized_phrase),
+            },
+        ));
+    }
+
+    if fuzzy_path_match {
+        let boost = if profile.identifier_like { 0.16 } else { 0.26 };
+        return Some((
+            boost,
+            4,
+            Evidence {
+                evidence_type: "path_shape_match".to_string(),
+                detail: format!("path tokens closely match '{}'", profile.normalized_phrase),
+            },
+        ));
+    }
+
+    None
+}
+
+fn token_matches_term(term: &str, token: &str) -> bool {
+    term == token || singularize_token(term) == token || singularize_token(token) == term
+}
+
+fn singularize_token(token: &str) -> String {
+    if token.len() <= 3 {
+        return token.to_string();
+    }
+
+    if let Some(stripped) = token.strip_suffix("ies") {
+        return format!("{stripped}y");
+    }
+
+    for suffix in ["ses", "xes", "zes", "ches", "shes"] {
+        if let Some(stripped) = token.strip_suffix(suffix) {
+            return stripped.to_string();
+        }
+    }
+
+    if token.ends_with('s') && !token.ends_with("ss") {
+        return token[..token.len() - 1].to_string();
+    }
+
+    token.to_string()
 }
 
 fn exact_phrase_boost(role: &FileRole, profile: &QueryProfile, fixture_like: bool) -> f64 {
@@ -541,7 +663,13 @@ fn symbol_definition_signal(
     let (base, tier, confidence) = match strength {
         SymbolMatchStrength::Exact => {
             let base = match role {
-                FileRole::Source => 0.68,
+                FileRole::Source => {
+                    if profile.identifier_like {
+                        0.68
+                    } else {
+                        0.44
+                    }
+                }
                 FileRole::Doc => 0.32,
                 FileRole::Test => 0.44,
                 FileRole::Config => 0.36,
@@ -549,7 +677,12 @@ fn symbol_definition_signal(
                 FileRole::Generated => 0.06,
                 FileRole::Other => 0.40,
             };
-            (base, 4, Confidence::High)
+            let tier = if matches!(role, FileRole::Source) {
+                5
+            } else {
+                4
+            };
+            (base, tier, Confidence::High)
         }
         SymbolMatchStrength::Strong => (0.28, 3, Confidence::Medium),
         SymbolMatchStrength::Loose => (0.14, 2, Confidence::Low),
@@ -1518,6 +1651,32 @@ mod tests {
             .evidence
             .iter()
             .any(|item| item.evidence_type == "indexed_symbol_definition"));
+    }
+
+    #[test]
+    fn topic_queries_rank_matching_filenames_ahead_of_broad_symbol_hubs() {
+        let matches = vec![
+            match_item("app/models.py", 18, "class MeetingSession(Model):"),
+            match_item("app/meeting_session.py", 22, "def start_session():"),
+            match_item("app/routers/meeting_sessions.py", 14, "def build_router():"),
+        ];
+        let index = repo_index(
+            vec![
+                indexed_symbol("MeetingSession", "app/models.py", 18),
+                indexed_symbol("start_session", "app/meeting_session.py", 22),
+            ],
+            vec![],
+            vec![],
+            vec![
+                indexed_file("app/models.py", IndexFileRole::Source),
+                indexed_file("app/meeting_session.py", IndexFileRole::Source),
+                indexed_file("app/routers/meeting_sessions.py", IndexFileRole::Source),
+            ],
+        );
+
+        let candidates = rank_with_index("meeting session", matches, Some(&index), "fresh");
+        assert_eq!(candidates.first().unwrap().path, "app/meeting_session.py");
+        assert_ne!(candidates.first().unwrap().path, "app/models.py");
     }
 
     #[test]

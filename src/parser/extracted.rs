@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::index::{EdgeConfidence, IndexedEdge};
+use crate::index::{EdgeConfidence, IndexedEdge, IndexedSymbolReference, ReferenceContext};
 use crate::types::{IndexedSymbol, SymbolKind, Visibility};
 
 use super::language::LanguageKind;
@@ -9,12 +9,14 @@ use super::language::LanguageKind;
 pub struct FileFacts {
     pub symbols: Vec<IndexedSymbol>,
     pub edges: Vec<IndexedEdge>,
+    pub symbol_references: Vec<ImportBinding>,
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct RepoFacts {
     pub symbols: Vec<IndexedSymbol>,
     pub edges: Vec<IndexedEdge>,
+    pub symbol_references: Vec<ImportBinding>,
     pub rust_file_count: usize,
     pub rust_symbol_count: usize,
     pub rust_edge_count: usize,
@@ -30,6 +32,7 @@ impl RepoFacts {
 
         self.symbols.extend(facts.symbols);
         self.edges.extend(facts.edges);
+        self.symbol_references.extend(facts.symbol_references);
     }
 }
 
@@ -68,6 +71,32 @@ pub fn edge(
         to: to.to_string(),
         confidence,
         reason,
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportBinding {
+    pub from_file: String,
+    pub symbol_name: String,
+    pub target_file: Option<String>,
+    pub line_number: usize,
+    pub confidence: EdgeConfidence,
+    pub reason: String,
+}
+
+impl ImportBinding {
+    pub fn into_reference(self, target_line: Option<usize>) -> IndexedSymbolReference {
+        IndexedSymbolReference {
+            from_file: self.from_file,
+            symbol_name: self.symbol_name,
+            target_file: self.target_file,
+            target_line,
+            line_number: self.line_number,
+            confidence: self.confidence,
+            reason: self.reason,
+            context: ReferenceContext::Production,
+            additional_count: 0,
+        }
     }
 }
 

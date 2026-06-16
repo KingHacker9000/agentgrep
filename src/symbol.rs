@@ -540,7 +540,9 @@ fn build_symbol_next_actions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::{EdgeConfidence, FileRole, IndexState, IndexStats, IndexedEdge, RepoIndex};
+    use crate::index::{
+        EdgeConfidence, FileRole, IndexState, IndexStats, IndexedEdge, IndexedFile, RepoIndex,
+    };
     use std::path::PathBuf;
 
     fn repo() -> RepoInfo {
@@ -819,6 +821,63 @@ mod tests {
             crate::index::ReferenceContext::Fixture
         );
         assert_eq!(references[1].additional_count, 1);
+    }
+
+    #[test]
+    fn collect_used_by_includes_direct_import_bindings() {
+        let index = RepoIndex {
+            schema_version: crate::index::INDEX_SCHEMA_VERSION,
+            repo_root: "C:/repo".to_string(),
+            repo_rev: Some("abc".to_string()),
+            indexed_at_unix: 1,
+            files: vec![IndexedFile {
+                path: "app/llm_client.py".to_string(),
+                role: FileRole::Source,
+                size_bytes: Some(100),
+                modified_unix: Some(1),
+                content_hash: Some("aa".to_string()),
+            }],
+            symbols: vec![IndexedSymbol {
+                name: "LLMClient".to_string(),
+                kind: crate::types::SymbolKind::Struct,
+                file_path: "app/llm_client.py".to_string(),
+                line_number: 4,
+                visibility: crate::types::Visibility::Public,
+                signature: Some("class LLMClient:".to_string()),
+            }],
+            symbol_references: vec![crate::index::IndexedSymbolReference {
+                from_file: "app/meeting_session.py".to_string(),
+                symbol_name: "LLMClient".to_string(),
+                target_file: Some("app/llm_client.py".to_string()),
+                target_line: Some(4),
+                line_number: 2,
+                confidence: EdgeConfidence::Extracted,
+                reason: "direct import binding from app/llm_client.py".to_string(),
+                context: crate::index::ReferenceContext::Production,
+                additional_count: 0,
+            }],
+            edges: vec![],
+            stats: IndexStats {
+                file_count: 1,
+                role_counts: BTreeMap::from([(FileRole::Source, 1)]),
+                symbol_count: 1,
+                symbol_kind_counts: BTreeMap::new(),
+                symbol_reference_count: 1,
+                connection_count: 0,
+            },
+        };
+        let symbol = IndexedSymbol {
+            name: "LLMClient".to_string(),
+            kind: crate::types::SymbolKind::Struct,
+            file_path: "app/llm_client.py".to_string(),
+            line_number: 4,
+            visibility: crate::types::Visibility::Public,
+            signature: Some("class LLMClient:".to_string()),
+        };
+
+        let references = collect_used_by(&index, &symbol);
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].from_file, "app/meeting_session.py");
     }
 
     #[test]

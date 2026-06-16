@@ -5,7 +5,7 @@ use tree_sitter::Node;
 use crate::index::EdgeConfidence;
 use crate::types::{SymbolKind, Visibility};
 
-use super::extracted::{edge, file_facts, symbol, FileFacts};
+use super::extracted::{edge, file_facts, symbol, FileFacts, ImportBinding};
 use super::language::{join_relative, normalize_path, parent_dir, parse_source, RepoLookup};
 use super::symbol_signature;
 
@@ -47,6 +47,19 @@ fn walk_ts_node(
                         EdgeConfidence::Extracted,
                         format!("imports {}", normalize_path(&target)),
                     ));
+                    for imported_name in ts_named_imports(node, source) {
+                        facts.symbol_references.push(ImportBinding {
+                            from_file: file_path.to_string(),
+                            symbol_name: imported_name,
+                            target_file: Some(target.clone()),
+                            line_number: node.start_position().row + 1,
+                            confidence: EdgeConfidence::Extracted,
+                            reason: format!(
+                                "direct import binding from {}",
+                                normalize_path(&target)
+                            ),
+                        });
+                    }
                 }
             }
         }
@@ -60,6 +73,19 @@ fn walk_ts_node(
                         EdgeConfidence::Extracted,
                         format!("imports {}", normalize_path(&target)),
                     ));
+                    for imported_name in ts_named_imports(node, source) {
+                        facts.symbol_references.push(ImportBinding {
+                            from_file: file_path.to_string(),
+                            symbol_name: imported_name,
+                            target_file: Some(target.clone()),
+                            line_number: node.start_position().row + 1,
+                            confidence: EdgeConfidence::Extracted,
+                            reason: format!(
+                                "direct import binding from {}",
+                                normalize_path(&target)
+                            ),
+                        });
+                    }
                 }
             }
 
@@ -189,6 +215,36 @@ fn resolve_ts_import(
     lookup.resolve_candidates(candidates)
 }
 
+fn ts_named_imports(node: Node, source: &str) -> Vec<String> {
+    let Some(text) = node.utf8_text(source.as_bytes()).ok() else {
+        return Vec::new();
+    };
+    let Some(start) = text.find('{') else {
+        return Vec::new();
+    };
+    let Some(end) = text[start + 1..].find('}') else {
+        return Vec::new();
+    };
+
+    text[start + 1..start + 1 + end]
+        .split(',')
+        .filter_map(|part| {
+            let mut item = part.trim();
+            if item.is_empty() {
+                return None;
+            }
+            if let Some((before_as, _)) = item.split_once(" as ") {
+                item = before_as.trim();
+            }
+            if item.is_empty() || item == "*" {
+                None
+            } else {
+                Some(item.to_string())
+            }
+        })
+        .collect()
+}
+
 fn string_literal_text(node: Node, source: &str) -> Option<String> {
     match node.kind() {
         "string" | "template_string" => {
@@ -279,7 +335,7 @@ mod tests {
     #[test]
     fn extracts_typescript_symbols_and_import_edges() {
         let source = r#"
-import helper from "./helper";
+import { LLMClient } from "./llm_client";
 export { shared } from "../shared";
 export function build() {}
 const render = () => {};
@@ -287,11 +343,14 @@ const render = () => {};
         let facts = extract_file_facts(
             "src/app.ts",
             source,
-            &lookup(&["src/app.ts", "src/helper.ts", "shared.ts"]),
+            &lookup(&["src/app.ts", "src/llm_client.ts", "shared.ts"]),
         );
         assert!(facts.symbols.iter().any(|symbol| symbol.name == "build"));
         assert!(facts.symbols.iter().any(|symbol| symbol.name == "render"));
-        assert!(facts.edges.iter().any(|edge| edge.to == "src/helper.ts"));
+        assert!(facts
+            .symbol_references
+            .iter()
+            .any(|binding| binding.symbol_name == "LLMClient"));
         assert!(facts.edges.iter().any(|edge| edge.to == "shared.ts"));
     }
 
