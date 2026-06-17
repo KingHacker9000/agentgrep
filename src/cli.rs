@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum};
+use clap_complete::Shell;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum FindRoleSelection {
@@ -95,5 +96,11 @@ pub enum Commands {
         /// Write stable JSON instead of text.
         #[arg(long, help = "Write stable JSON instead of text.")]
         json: bool,
+    },
+    /// Print shell completions to stdout and exit.
+    #[command(hide = true)]
+    Completions {
+        /// Shell to generate completions for.
+        shell: Shell,
     },
 }

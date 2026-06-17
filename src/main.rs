@@ -13,7 +13,7 @@ mod text;
 mod types;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 
 fn main() {
     if let Err(err) = run() {
@@ -113,6 +113,10 @@ fn run() -> Result<()> {
             let repo = repo::discover()?;
             let report = blast::build_report(&repo, &query)?;
             blast::write_report(&report, json)?;
+        }
+        cli::Commands::Completions { shell } => {
+            let mut cmd = cli::Cli::command();
+            clap_complete::generate(shell, &mut cmd, "agentgrep", &mut std::io::stdout());
         }
     }
 

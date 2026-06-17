@@ -37,7 +37,16 @@ Run these commands in order. Each should succeed without error.
 agentgrep --version
 ```
 
-Expected: prints `agentgrep 0.1.1` (or current version).
+Expected: prints `agentgrep` followed by the current version from `Cargo.toml`.
+
+If you also have a local clone, verify the installed binary matches the source:
+
+```bash
+agentgrep --version
+cargo run -- --version
+```
+
+Both should print the same version. If they differ, run `cargo install --path . --force` to sync.
 
 ### 2. Build index
 
@@ -91,6 +100,22 @@ This runs:
 
 Output is written to `manual-test/`.
 
+## Find the installed binary
+
+### Windows
+
+```powershell
+where.exe agentgrep
+# expected: C:\Users\<user>\.cargo\bin\agentgrep.exe
+```
+
+### Linux / macOS
+
+```bash
+which agentgrep
+# expected: /home/<user>/.cargo/bin/agentgrep
+```
+
 ## Troubleshooting
 
 **`rg` not found**
@@ -120,5 +145,26 @@ agentgrep index
 Ensure `~/.cargo/bin` is on your PATH:
 
 ```bash
+# Linux / macOS
 export PATH="$HOME/.cargo/bin:$PATH"
+# Add to ~/.bashrc or ~/.zshrc to persist
 ```
+
+```powershell
+# Windows — add to user PATH via System Properties, or for the current session:
+$env:PATH += ";$env:USERPROFILE\.cargo\bin"
+```
+
+**Installed binary shows wrong version**
+
+The shell may be caching the old path. Re-install and refresh:
+
+```bash
+cargo install --path . --force
+hash -r              # bash/zsh — clears the command cache
+agentgrep --version  # should now match Cargo.toml
+```
+
+On Windows, close and reopen the terminal after `cargo install --path . --force`.
+
+For full release verification, see [docs/RELEASE.md](./RELEASE.md).
