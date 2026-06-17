@@ -1,6 +1,8 @@
 /target/
 /.agentgrep/
 /manual-test/
+/eval-worktree/
+/eval-results/
 
 # Editor and OS noise
 .DS_Store

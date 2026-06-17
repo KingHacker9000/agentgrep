@@ -1,0 +1,6 @@
+{"task_id":"agentgrep-feat-001","repo_id":"agentgrep","labels":[{"path":"src/rank.rs","label":"primary"},{"path":"src/search.rs","label":"supporting"},{"path":"src/types.rs","label":"supporting"}]}
+{"task_id":"agentgrep-feat-002","repo_id":"agentgrep","labels":[{"path":"src/semantic.rs","label":"primary"},{"path":"src/cli.rs","label":"supporting"}]}
+{"task_id":"agentgrep-err-001","repo_id":"agentgrep","labels":[{"path":"src/search.rs","label":"primary"},{"path":"src/rank.rs","label":"irrelevant"}]}
+{"task_id":"agentgrep-sym-001","repo_id":"agentgrep","labels":[{"path":"src/search.rs","label":"primary"},{"path":"src/types.rs","label":"supporting"},{"path":"src/rank.rs","label":"supporting"},{"path":"src/related.rs","label":"supporting"},{"path":"src/blast.rs","label":"supporting"}]}
+{"task_id":"agentgrep-refac-001","repo_id":"agentgrep","labels":[{"path":"src/index.rs","label":"primary"}]}
+{"task_id":"agentgrep-impact-001","repo_id":"agentgrep","labels":[{"path":"src/search.rs","label":"primary"},{"path":"src/rank.rs","label":"supporting"},{"path":"src/types.rs","label":"supporting"},{"path":"src/related.rs","label":"supporting"},{"path":"src/blast.rs","label":"supporting"}]}

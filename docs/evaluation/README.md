@@ -137,9 +137,64 @@ These are not current work. Add only if real codebase tests show a specific gap.
 | File | Purpose |
 |---|---|
 | `README.md` | This file — scaffold overview and mode definitions |
+| `BENCHMARKS.md` | Public benchmark philosophy, repo criteria, how to extend and rerun |
+| `METRICS.md` | Metric definitions (automated + manual) and what not to overclaim |
+| `TASK_SCHEMA.md` | Repo manifest, task, label, and mode-output schemas |
 | `TASKS.md` | Task categories and example prompts |
-| `METRICS.md` | Metric definitions and what not to overclaim |
-| `RESULT_TEMPLATE.md` | Copy-paste template for recording one evaluation run |
+| `RESULT_TEMPLATE.md` | Copy-paste template for recording one manual evaluation run |
+| `public-repos.jsonl` | Repo manifest (pinned public repos) |
+| `tasks/public-v0.1.jsonl` | Public task set |
+| `labels/public-v0.1.jsonl` | Relevance labels for the public task set |
+
+The runnable harness lives in `scripts/`:
+
+| Script | Purpose |
+|---|---|
+| `scripts/run-eval.ps1` | Clone pinned repos, run Modes A–D, capture raw output + latency |
+| `scripts/analyze-eval.py` | Compute metrics, write `summary.csv` / `summary.json` |
+
+---
+
+## Public benchmark workflow (automated)
+
+The automated benchmark runs the four modes against pinned public repos and
+labeled tasks, then computes the retrieval and semantic metrics. This is the
+path that produces reportable numbers. The manual session below is for
+qualitative review.
+
+```powershell
+# 1. (Optional) validate task/label data first.
+python scripts/analyze-eval.py --validate `
+  --tasks docs/evaluation/tasks/public-v0.1.jsonl `
+  --labels docs/evaluation/labels/public-v0.1.jsonl
+
+# 2. Run Modes A, B, C (and D only with -EnableSemantic).
+powershell -ExecutionPolicy Bypass -File scripts/run-eval.ps1 `
+  -RepoManifest docs/evaluation/public-repos.jsonl `
+  -TaskFile     docs/evaluation/tasks/public-v0.1.jsonl `
+  -LabelFile    docs/evaluation/labels/public-v0.1.jsonl `
+  -OutDir       eval-results
+
+# 3. Compute metrics for the run that just completed.
+python scripts/analyze-eval.py `
+  --run-dir eval-results/<run-id> `
+  --labels  docs/evaluation/labels/public-v0.1.jsonl
+```
+
+`run-eval.ps1 -Help` prints full options. Mode D is skipped unless
+`-EnableSemantic` is passed and a semantic index can be built.
+
+Outputs land under `eval-results/<run-id>/`: `raw/` (full stdout/stderr per
+run), `parsed/results.jsonl`, `run-meta.json`, and `summary.{csv,json}`.
+`eval-worktree/` and `eval-results/` are git-ignored.
+
+See [BENCHMARKS.md](./BENCHMARKS.md) for philosophy and how to add a repo/task/
+label, [TASK_SCHEMA.md](./TASK_SCHEMA.md) for the data formats, and
+[METRICS.md](./METRICS.md) for metric definitions.
+
+> **Agentic workflow evaluation is later work.** This benchmark measures
+> *retrieval* — ranked file lists per mode. It does not measure multi-step agent
+> loops, edit success, or end-to-end task completion. That is out of scope here.
 
 ---
 

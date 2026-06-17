@@ -1,6 +1,163 @@
 # Evaluation Metrics
 
-These metrics are designed to be measurable by a human reviewer inspecting command output, without requiring automated harness infrastructure.
+This document defines two complementary metric families:
+
+1. **Automated retrieval metrics** — computed by `scripts/analyze-eval.py` from
+   captured command output and labeled tasks. These power the public benchmark
+   (see [BENCHMARKS.md](./BENCHMARKS.md)) and require no human judgment per run.
+2. **Manual reviewer metrics** — measurable by a human inspecting command output,
+   used for qualitative review and for task types the automated harness does not
+   yet score (`map`, `symbol`, `related`, `blast` graph quality).
+
+The automated metrics are the ones reported in published benchmark tables. The
+manual metrics remain useful for diagnosing *why* a number is low.
+
+> **Report every metric broken down by task type.** A tool can be excellent at
+> exact error lookup and weak at feature localization; a single aggregate hides
+> that. The analyzer always groups by repo, task type, and mode. Aggregate-only
+> numbers are not acceptable benchmark claims.
+
+---
+
+## Automated retrieval metrics
+
+These are computed against a ranked list of file paths produced by each mode
+(see [TASK_SCHEMA.md](./TASK_SCHEMA.md) for the mode output schema) and the
+labeled relevant files for the task. Unless stated otherwise, ranking position
+is 1-based.
+
+Label-to-relevance mapping used by the metrics below:
+
+| Label | Counts as a "hit"? | Graded gain (nDCG) | In relevant set (P/R)? |
+|---|---|---|---|
+| `primary` | yes | 3 | yes |
+| `acceptable` | yes | 2 | yes |
+| `supporting` | no | 1 | yes |
+| `irrelevant` | no | 0 | no |
+| unlabeled | no | 0 | no |
+
+A **hit** means a `primary` or `acceptable` file — a file that genuinely answers
+the task. `supporting` files are relevant context but do not by themselves
+satisfy the task, so they count toward Precision/Recall/nDCG but not Hit@k/MRR.
+
+### Hit@1, Hit@3, Hit@8
+
+**Definition:** fraction of tasks where a hit (primary/acceptable) appears within
+the top 1, top 3, or top 8 ranked files respectively.
+
+**Why it matters:** agents read top candidates first. Hit@1 is the strongest
+single signal; Hit@3 and Hit@8 capture "found it within a few opens."
+
+### MRR (Mean Reciprocal Rank)
+
+**Definition:** mean of `1 / rank_of_first_hit` across tasks. If no hit appears
+in the ranked list, the task contributes 0.
+
+**Why it matters:** rewards putting the right file high without collapsing to a
+binary cutoff.
+
+### nDCG@8 (normalized Discounted Cumulative Gain)
+
+**Definition:** DCG@8 using graded gains (primary=3, acceptable=2, supporting=1),
+normalized by the ideal DCG@8 for the task's labels. Gain discount is
+`gain / log2(rank + 1)`.
+
+**Why it matters:** graded, rank-sensitive quality measure. Distinguishes "right
+file at rank 1" from "right file at rank 7" and credits useful supporting files.
+
+### Precision@8
+
+**Definition:** of the top 8 ranked files, the fraction that are in the relevant
+set (primary/acceptable/supporting).
+
+**Why it matters:** measures noise. A high Hit@8 with low Precision@8 means the
+agent still wades through junk.
+
+### Recall@8
+
+**Definition:** of all relevant files labeled for the task, the fraction that
+appear in the top 8 ranked files.
+
+**Why it matters:** for refactor/impact tasks the agent needs *all* the sites,
+not just one. Recall@8 captures coverage.
+
+### Unnecessary files before first hit
+
+**Definition:** number of ranked files above the first hit (i.e.
+`rank_of_first_hit - 1`). If there is no hit in the list, record as a miss
+(excluded from the mean, counted in a separate `miss` tally).
+
+**Why it matters:** each file above the answer is a wasted context read. This is
+the concrete cost metric an agent owner cares about.
+
+### JSON parse success
+
+**Definition:** fraction of mode runs whose `--json` output parsed as valid JSON.
+Mode A (rg) is parsed as rg's JSON-lines; modes B/C/D as the agentgrep `find`
+contract.
+
+**Why it matters:** an agent's tool call fails entirely on unparseable output.
+**Target: 100%.** Any parse failure is a blocking bug, not a quality issue.
+
+### Latency p50 / p95
+
+**Definition:** median and 95th-percentile wall-clock latency per mode, in
+milliseconds, measured by the harness around each command invocation. Report
+index build time separately from per-query time.
+
+**Why it matters:** retrieval that is accurate but slow still costs the agent.
+p95 surfaces tail behavior that a mean hides.
+
+---
+
+## Semantic metrics (Mode D vs Mode C)
+
+Semantic mode (`--semantic`, Mode D) is only worth shipping if it helps more than
+it hurts. These metrics are computed by comparing each task's Mode D result
+against its Mode C result on the **same task and repo**. They are meaningless in
+isolation — always paired C↔D.
+
+### Semantic-only helpful hit rate
+
+**Definition:** fraction of tasks where a hit (primary/acceptable) appears in
+Mode D's top 8 but **not** in Mode C's top 8. These are wins that only semantic
+retrieval delivered.
+
+**Why it matters:** this is the entire upside case for semantic mode. If it is
+near zero, semantic mode is not earning its complexity.
+
+### Bad promotion rate
+
+**Definition:** fraction of tasks where an `irrelevant`-labeled file appears in
+Mode D's top 8 but not in Mode C's top 8 (semantic pulled in noise).
+
+**Why it matters:** semantic recall can surface plausible-but-wrong files. This
+is the primary downside to watch.
+
+### Exact-query regression rate
+
+**Definition:** fraction of tasks (especially `exact-error-lookup`) where Mode C
+had Hit@1 but Mode D did **not** — i.e. semantic expansion demoted an
+exact-match answer.
+
+**Why it matters:** semantic mode must never degrade the deterministic strength
+of exact matches. **Target: 0.** Any regression here is a design failure, since
+deterministic evidence is supposed to dominate ranking.
+
+### Semantic latency overhead
+
+**Definition:** per-task latency delta `latency(D) - latency(C)`, reported as p50
+and p95 deltas. Report semantic index build time separately.
+
+**Why it matters:** quantifies the runtime cost the helpful-hit rate must justify.
+
+---
+
+## Manual reviewer metrics
+
+These metrics are measurable by a human reviewer inspecting command output,
+without requiring automated harness infrastructure. They cover graph-quality
+dimensions the automated retrieval metrics do not score.
 
 ---
 
@@ -106,7 +263,7 @@ These metrics are designed to be measurable by a human reviewer inspecting comma
 - **Do not compare modes A vs. C without running the same tasks on the same repos.** Different repos and tasks make comparisons meaningless.
 - **Do not claim latency improvements without measuring.** Perceived speed is not the same as measured time.
 - **Do not treat blast false positives as failures.** `blast` is explicitly described as a conservative estimate. A long list is expected.
-- **Do not report Mode D (semantic) results.** Mode D is not yet implemented.
+- **Do not report Mode D (semantic) results in isolation.** Mode D is experimental; only report it paired against Mode C on the same tasks (see the semantic metrics above), never as a standalone claim.
 - **Do not conflate index freshness issues with retrieval quality issues.** If the index is stale, note it as an index issue, not a ranking failure.
 - **Do not extrapolate from one repo to all repos.** Record the repo name, size, and language in every result.
 
