@@ -185,17 +185,26 @@ If either revision is unavailable (non-git repo, no HEAD), the index is used as-
 
 ---
 
-## Removing semantic data
+## Managing the semantic index
 
 ```bash
-# Remove semantic index for current repo (git)
-rm -rf .git/agentgrep/semantic/
+# Show the state of the semantic index and model cache
+agentgrep semantic status
 
-# Remove model cache (global)
-# Windows:
-rmdir /s /q "%LOCALAPPDATA%\agentgrep\models"
-# macOS/Linux:
-rm -rf ~/.cache/agentgrep/models
+# Remove only the repo-local semantic index (meta.json + vectors.bin)
+agentgrep semantic clean --repo-index
+
+# Remove only the global model cache (~130 MB download)
+agentgrep semantic clean --model
+
+# Remove both
+agentgrep semantic clean --all
 ```
 
-Removing the semantic index does not affect the normal index or any other Agentgrep functionality.
+`status` shows:
+- Semantic index path and whether it exists
+- Model name and dimensions (if the index is readable)
+- File count in the index
+- Model cache path and whether it is present
+
+`clean` operations are explicit and do not prompt. Removing the semantic index does not affect the normal index or any other Agentgrep functionality. Removing the model cache means the next `agentgrep index --semantic` will re-download the model.

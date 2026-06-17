@@ -15,7 +15,7 @@ The contract is intended to stay stable during v0.x unless this document says ot
 - `index_status` reports the index state for the current command.
 - `index_used` means index facts contributed to `find` ranking or evidence.
 - `risk_level` is the conservative blast estimate: `low`, `medium`, or `high`.
-- `coverage.semantic_status` reports whether semantic retrieval was active for a `find` response. Current values: `not_requested` (default, no `--semantic` flag passed). Future value `active` when a configured provider is used. Semantic mode is experimental and opt-in only via `--semantic`.
+- `coverage.semantic_status` reports whether semantic retrieval was active for a `find` response. Values: `not_requested` (default, no `--semantic` flag passed) or `active` (semantic ran and contributed). Semantic mode is experimental and opt-in only via `--semantic`.
 
 ## `index_status`
 
@@ -325,6 +325,11 @@ agentgrep find "where is the embedding provider configured" --semantic
 - Deterministic (rg + BM25 + graph) evidence is always stronger than semantic evidence in the final ranking.
 - Default `find` behavior (no `--semantic`) is unchanged.
 - If the semantic index is missing or stale, `find --semantic` fails with a clear error and the next action: `agentgrep index --semantic`.
+- If the semantic index was built with a different model name, dimensions, or schema version than the current binary expects, `find --semantic` fails with a clear error identifying the mismatch and the next action: `agentgrep index --semantic`.
+
+### Semantic management commands
+
+`agentgrep semantic status` and `agentgrep semantic clean` are text-only commands (no `--json`). They inspect and remove semantic data without affecting the normal index.
 
 ### Storage
 

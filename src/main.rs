@@ -136,6 +136,34 @@ fn run() -> Result<()> {
             let report = blast::build_report(&repo, &query)?;
             blast::write_report(&report, json)?;
         }
+        cli::Commands::Semantic { action } => {
+            let repo = repo::discover()?;
+            match action {
+                cli::SemanticAction::Status => {
+                    let report = semantic::semantic_status(&repo)?;
+                    semantic::write_semantic_status_report(&report);
+                }
+                cli::SemanticAction::Clean {
+                    repo_index,
+                    model,
+                    all,
+                } => {
+                    let report = if all {
+                        semantic::clean_all(&repo)?
+                    } else if repo_index {
+                        semantic::clean_repo_index(&repo)?
+                    } else if model {
+                        semantic::clean_model_cache()?
+                    } else {
+                        anyhow::bail!(
+                            "specify at least one of --repo-index, --model, or --all.\n\
+                             Run `agentgrep semantic clean --help` for options."
+                        )
+                    };
+                    semantic::write_semantic_clean_report(&report);
+                }
+            }
+        }
         cli::Commands::Completions { shell } => {
             let mut cmd = cli::Cli::command();
             clap_complete::generate(shell, &mut cmd, "agentgrep", &mut std::io::stdout());

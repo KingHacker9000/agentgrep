@@ -40,6 +40,12 @@ const SEMANTIC_TOP_K: usize = 8;
 /// Minimum cosine similarity to include a semantic candidate.
 const COSINE_THRESHOLD: f32 = 0.30;
 
+/// Warn when a repo has this many files to embed (slow on first run).
+const FILE_WARN_THRESHOLD: usize = 5_000;
+
+/// Hard limit on files embedded in a single run to bound memory usage.
+const FILE_HARD_CAP: usize = 50_000;
+
 // ── legacy availability types (kept for tests; no longer called from main) ───
 
 #[allow(dead_code)]
@@ -364,6 +370,20 @@ pub fn build_semantic(
             .push(sym.name.clone());
     }
 
+    if idx.files.len() > FILE_HARD_CAP {
+        bail!(
+            "repo has {} indexed files, which exceeds the semantic index hard cap of {}.\n\
+             Exclude generated or vendor directories (e.g. target/, node_modules/) and rerun.",
+            idx.files.len(),
+            FILE_HARD_CAP
+        );
+    }
+    if idx.files.len() > FILE_WARN_THRESHOLD {
+        eprintln!(
+            "Warning: embedding {} files — first run may be slow.",
+            idx.files.len()
+        );
+    }
     eprintln!("Embedding {} files...", idx.files.len());
 
     let mut file_entries: Vec<SemanticFileEntry> = Vec::with_capacity(idx.files.len());
@@ -447,7 +467,29 @@ pub fn load_semantic(repo: &RepoInfo) -> Result<SemanticIndex> {
 
     let meta_bytes = fs::read(&meta_file).context("failed to read meta.json")?;
     let meta: SemanticMeta =
-        serde_json::from_slice(&meta_bytes).context("failed to parse meta.json")?;
+        serde_json::from_slice(&meta_bytes).context("failed to parse meta.json — index may be corrupt; run `agentgrep index --semantic` to rebuild")?;
+
+    // Schema version check: catch future upgrades.
+    if meta.schema_version != SEMANTIC_SCHEMA_VERSION {
+        bail!(
+            "semantic index uses schema version {} but this binary expects {}.\n\
+             Run `agentgrep index --semantic` to rebuild.",
+            meta.schema_version,
+            SEMANTIC_SCHEMA_VERSION
+        );
+    }
+
+    // Model compatibility: fail if the index was built with a different model or dimensions.
+    if meta.model_name != MODEL_NAME || meta.dimensions != EMBEDDING_DIMS {
+        bail!(
+            "semantic index was built with {} ({} dims) but current model is {} ({} dims).\n\
+             Run `agentgrep index --semantic` to rebuild.",
+            meta.model_name,
+            meta.dimensions,
+            MODEL_NAME,
+            EMBEDDING_DIMS
+        );
+    }
 
     // Staleness: fail if both revs are present and differ.
     if let (Some(indexed_rev), Some(repo_rev)) = (&meta.repo_rev, &repo.rev) {
@@ -487,9 +529,29 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 
 // ── find --semantic: expand candidates ───────────────────────────────────────
 
+/// Returns true when `query` looks like a code identifier rather than natural language.
+///
+/// Heuristic: no whitespace AND (contains an uppercase letter after the first character,
+/// i.e. CamelCase, OR contains an underscore, i.e. snake_case).
+///
+/// Examples that return true:  `SearchResult`, `SemanticState`, `run_rg`, `expand_candidates`
+/// Examples that return false: `where is semantic provider configured`, `searchresult`, `foo`
+pub fn is_identifier_like(query: &str) -> bool {
+    if query.contains(char::is_whitespace) {
+        return false;
+    }
+    let has_camel = query.char_indices().skip(1).any(|(_, c)| c.is_uppercase());
+    let has_snake = query.contains('_');
+    has_camel || has_snake
+}
+
 /// Load model + semantic index, embed the query, run cosine search, and merge
 /// semantic candidates with the deterministic candidates already ranked by
 /// `rank::rank_with_index`.
+///
+/// For identifier-like queries (CamelCase / snake_case, no spaces), semantic results
+/// only annotate existing deterministic candidates — no score boost and no new
+/// semantic-only candidates are injected, so deterministic ranking is fully preserved.
 ///
 /// Returns `(merged_candidates, semantic_status_string)`.
 pub fn expand_candidates(
@@ -500,6 +562,8 @@ pub fn expand_candidates(
     let cache_dir = model_cache_dir()?;
     let model = load_model_for_find(&cache_dir)?;
     let sem_index = load_semantic(repo)?;
+
+    let identifier_query = is_identifier_like(query);
 
     // Embed the query.
     let mut embeddings = model
@@ -544,11 +608,15 @@ pub fn expand_candidates(
         };
 
         if let Some(&idx) = det_map.get(path.as_str()) {
-            // Already in deterministic results: annotate + small score boost.
+            // Already in deterministic results: annotate with evidence.
+            // For identifier-like queries skip the score boost so deterministic
+            // ranking is not disturbed.
             det_candidates[idx].evidence.push(evidence);
-            det_candidates[idx].score += (*similarity * 0.3) as f64;
-        } else {
-            // Semantic-only candidate.
+            if !identifier_query {
+                det_candidates[idx].score += (*similarity * 0.3) as f64;
+            }
+        } else if !identifier_query {
+            // Semantic-only candidate: not added for identifier queries.
             let role = crate::index::classify_role(path).to_string();
             let score = (*similarity * 0.8) as f64;
             let confidence = if *similarity >= 0.6 {
@@ -581,6 +649,149 @@ pub fn expand_candidates(
     Ok((det_candidates, "active".to_string()))
 }
 
+// ── semantic status ───────────────────────────────────────────────────────────
+
+pub struct SemanticStatusReport {
+    pub semantic_dir: PathBuf,
+    pub semantic_index_exists: bool,
+    pub model_cache_dir: PathBuf,
+    pub model_cached: bool,
+    /// Parsed from meta.json when the index exists; None if missing or unreadable.
+    pub meta: Option<SemanticMeta>,
+}
+
+pub fn semantic_status(repo: &RepoInfo) -> Result<SemanticStatusReport> {
+    let sem_dir = semantic_dir(repo);
+    let cache_dir = model_cache_dir()?;
+    let semantic_index_exists = meta_path(&sem_dir).exists();
+    let model_cached = is_model_cached(&cache_dir);
+    let meta = if semantic_index_exists {
+        fs::read(meta_path(&sem_dir))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<SemanticMeta>(&b).ok())
+    } else {
+        None
+    };
+    Ok(SemanticStatusReport {
+        semantic_dir: sem_dir,
+        semantic_index_exists,
+        model_cache_dir: cache_dir,
+        model_cached,
+        meta,
+    })
+}
+
+pub fn write_semantic_status_report(report: &SemanticStatusReport) {
+    println!("Semantic status:");
+    let index_state = if report.semantic_index_exists {
+        "found"
+    } else {
+        "not found"
+    };
+    println!(
+        "  Semantic index:  {}  [{}]",
+        display_path(&report.semantic_dir),
+        index_state
+    );
+    if let Some(meta) = &report.meta {
+        println!(
+            "    model:       {} ({} dims)",
+            meta.model_name, meta.dimensions
+        );
+        println!("    files:       {}", meta.files.len());
+        if let Some(rev) = &meta.repo_rev {
+            println!("    repo_rev:    {}", rev);
+        }
+        println!("    created_at:  {}", meta.created_at);
+    }
+    let model_state = if report.model_cached {
+        "found"
+    } else {
+        "not found"
+    };
+    println!(
+        "  Model cache:     {}  [{}]",
+        display_path(&report.model_cache_dir),
+        model_state
+    );
+    if !report.model_cached {
+        println!(
+            "  Tip: run `agentgrep index --semantic` to download the model and build the index."
+        );
+    }
+}
+
+// ── semantic clean ────────────────────────────────────────────────────────────
+
+pub struct SemanticCleanReport {
+    pub repo_index_path: Option<PathBuf>,
+    pub repo_index_removed: bool,
+    pub model_path: Option<PathBuf>,
+    pub model_removed: bool,
+}
+
+fn remove_dir_if_exists(path: &Path) -> bool {
+    if path.exists() {
+        fs::remove_dir_all(path).is_ok()
+    } else {
+        false
+    }
+}
+
+pub fn clean_repo_index(repo: &RepoInfo) -> Result<SemanticCleanReport> {
+    let sem_dir = semantic_dir(repo);
+    let removed = remove_dir_if_exists(&sem_dir);
+    Ok(SemanticCleanReport {
+        repo_index_path: Some(sem_dir),
+        repo_index_removed: removed,
+        model_path: None,
+        model_removed: false,
+    })
+}
+
+pub fn clean_model_cache() -> Result<SemanticCleanReport> {
+    let cache_dir = model_cache_dir()?;
+    let removed = remove_dir_if_exists(&cache_dir);
+    Ok(SemanticCleanReport {
+        repo_index_path: None,
+        repo_index_removed: false,
+        model_path: Some(cache_dir),
+        model_removed: removed,
+    })
+}
+
+pub fn clean_all(repo: &RepoInfo) -> Result<SemanticCleanReport> {
+    let sem_dir = semantic_dir(repo);
+    let repo_removed = remove_dir_if_exists(&sem_dir);
+    let cache_dir = model_cache_dir()?;
+    let model_removed = remove_dir_if_exists(&cache_dir);
+    Ok(SemanticCleanReport {
+        repo_index_path: Some(sem_dir),
+        repo_index_removed: repo_removed,
+        model_path: Some(cache_dir),
+        model_removed: model_removed,
+    })
+}
+
+pub fn write_semantic_clean_report(report: &SemanticCleanReport) {
+    if let Some(path) = &report.repo_index_path {
+        let state = if report.repo_index_removed {
+            "removed"
+        } else {
+            "not present"
+        };
+        println!("  Semantic index:  {}  [{}]", display_path(path), state);
+    }
+    if let Some(path) = &report.model_path {
+        let state = if report.model_removed {
+            "removed"
+        } else {
+            "not present"
+        };
+        println!("  Model cache:     {}  [{}]", display_path(path), state);
+    }
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -596,6 +807,35 @@ mod tests {
     fn require_configured_is_ok() {
         assert!(require_configured("find").is_ok());
         assert!(require_configured("index").is_ok());
+    }
+
+    #[test]
+    fn identifier_like_camel_case() {
+        assert!(is_identifier_like("SearchResult"));
+        assert!(is_identifier_like("SemanticState"));
+        assert!(is_identifier_like("FileCandidate"));
+    }
+
+    #[test]
+    fn identifier_like_snake_case() {
+        assert!(is_identifier_like("run_rg"));
+        assert!(is_identifier_like("expand_candidates"));
+        assert!(is_identifier_like("read_file_preview"));
+    }
+
+    #[test]
+    fn identifier_like_natural_language_rejected() {
+        assert!(!is_identifier_like("where is semantic provider configured"));
+        assert!(!is_identifier_like("SearchResult and related"));
+        assert!(!is_identifier_like("how does auth work"));
+    }
+
+    #[test]
+    fn identifier_like_plain_word_rejected() {
+        // All lowercase, no separators: not identifier-like.
+        assert!(!is_identifier_like("searchresult"));
+        assert!(!is_identifier_like("foo"));
+        assert!(!is_identifier_like("auth"));
     }
 
     #[test]

@@ -112,10 +112,33 @@ pub enum Commands {
         #[arg(long, help = "Write stable JSON instead of text.")]
         json: bool,
     },
+    /// Inspect or clean the semantic index and model cache.
+    Semantic {
+        #[command(subcommand)]
+        action: SemanticAction,
+    },
     /// Print shell completions to stdout and exit.
     #[command(hide = true)]
     Completions {
         /// Shell to generate completions for.
         shell: Shell,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SemanticAction {
+    /// Show the state of the repo semantic index and global model cache.
+    Status,
+    /// Remove semantic data (semantic index and/or model cache).
+    Clean {
+        /// Remove the repo-local semantic index (meta.json + vectors.bin).
+        #[arg(long, conflicts_with_all = ["model", "all"])]
+        repo_index: bool,
+        /// Remove the global model cache directory.
+        #[arg(long, conflicts_with_all = ["repo_index", "all"])]
+        model: bool,
+        /// Remove both the repo-local semantic index and the model cache.
+        #[arg(long, conflicts_with_all = ["repo_index", "model"])]
+        all: bool,
     },
 }

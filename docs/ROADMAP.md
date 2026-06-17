@@ -395,6 +395,12 @@ Completed:
 - `docs/SEMANTIC.md` documents the full semantic workflow.
 - `docs/JSON_CONTRACT.md` updated.
 - `docs/evaluation/README.md` Mode D updated to reflect active status.
+- `docs/dev/SEMANTIC.md` documents dependency impact, binary size, timing, and upgrade path.
+- `agentgrep semantic status` — inspect the repo semantic index and global model cache.
+- `agentgrep semantic clean --repo-index / --model / --all` — remove semantic data without shell commands.
+- Schema version, model name, and dimensions are checked on load; incompatible indexes fail with a clear message.
+- For identifier-like queries (CamelCase, snake_case), semantic results annotate only — no score boost and no semantic-only candidates — so deterministic ranking is preserved.
+- Resource safety: warn at 5 000 files, hard cap at 50 000 files to bound memory.
 - All existing tests pass. Default behavior is unchanged.
 
 Shape (canonical, now matching existing flags):
