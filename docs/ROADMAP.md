@@ -1,13 +1,14 @@
 # Agentgrep Roadmap
 
-## Current milestone: Packaging / integrations
+## Current milestone: Comparative evaluation scaffold
 
 - [x] MVP core command loop
 - [x] Release hardening
 - [x] JSON contract stabilization
 - [x] Retrieval v2: BM25-style lexical ranking, identifier expansion, graph boosts
 - [x] Tree-sitter multi-language indexing (Rust, Python, JS, TS, Go)
-- [x] Packaging / integrations (current milestone)
+- [x] Packaging / integrations
+- [x] Comparative evaluation scaffold (current milestone)
 - [ ] Dogfood on real repos
 - [ ] Config file
 - [ ] Optional hybrid semantic mode behind a flag
@@ -183,6 +184,34 @@ Exit state:
 ---
 
 # Remaining milestones
+
+## Milestone 3.5 — Comparative evaluation scaffold
+
+Status: current.
+
+Goal:
+
+Define what to measure before adding new retrieval modes or making benchmark claims.
+
+Completed:
+
+- `docs/evaluation/README.md` — scaffold overview and mode definitions (A/B/C/D);
+- `docs/evaluation/TASKS.md` — task categories and example prompts;
+- `docs/evaluation/METRICS.md` — metric definitions and what not to overclaim;
+- `docs/evaluation/RESULT_TEMPLATE.md` — copy-paste template for recording one eval run;
+- `scripts/eval-smoke.ps1` — checks eval docs exist, runs a few local commands, writes to `manual-test/`.
+
+Exit criteria:
+
+- evaluation docs exist and are indexed by `agentgrep`;
+- `eval-smoke.ps1` passes without errors;
+- at least one result template filled in before Mode D work begins.
+
+Why evaluation before semantic mode:
+
+Adding a retrieval layer before measuring the current one means no baseline to compare against and no way to know whether the new layer actually helps. The scaffold must exist before Mode D work starts.
+
+---
 
 ## Milestone 4 — Dogfood on real repos
 

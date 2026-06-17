@@ -64,7 +64,7 @@ cargo build
 
 Requirements: Rust stable (1.75+) and `rg` on PATH. See [docs/INSTALL.md](./docs/INSTALL.md) for full install and verification steps.
 
-**Docs:** [Install guide](./docs/INSTALL.md) · [Release checklist](./docs/RELEASE.md) · [JSON contract](./docs/JSON_CONTRACT.md) · [Agent skill docs](./skill-docs/) · [CHANGELOG](./CHANGELOG.md)
+**Docs:** [Install guide](./docs/INSTALL.md) · [Release checklist](./docs/RELEASE.md) · [JSON contract](./docs/JSON_CONTRACT.md) · [Agent skill docs](./skill-docs/) · [Evaluation scaffold](./docs/evaluation/) · [CHANGELOG](./CHANGELOG.md)
 
 ## Quick start
 
