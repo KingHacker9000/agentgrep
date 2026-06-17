@@ -1,4 +1,20 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum FindRoleSelection {
+    Source,
+    Doc,
+    Config,
+    Test,
+    Other,
+    Any,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum FindMatchSelection {
+    Any,
+    All,
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -19,6 +35,18 @@ pub enum Commands {
     Find {
         /// Query to search for.
         query: String,
+        /// Repeatable path glob to include. Bare globs like `*.css` match by basename anywhere.
+        #[arg(long = "include", value_name = "GLOB")]
+        include: Vec<String>,
+        /// Repeatable path glob to exclude. Bare globs like `*.css` match by basename anywhere.
+        #[arg(long = "exclude", value_name = "GLOB")]
+        exclude: Vec<String>,
+        /// Prefer a specific file role.
+        #[arg(long, value_enum, default_value_t = FindRoleSelection::Any)]
+        role: FindRoleSelection,
+        /// Control whether files must match any or all significant query terms.
+        #[arg(long = "match", value_enum, default_value_t = FindMatchSelection::Any)]
+        match_mode: FindMatchSelection,
         /// Write stable JSON instead of text.
         #[arg(long, help = "Write stable JSON instead of text.")]
         json: bool,

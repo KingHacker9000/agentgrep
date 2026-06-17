@@ -26,7 +26,14 @@ fn run() -> Result<()> {
     let cli = cli::Cli::parse();
 
     match cli.command {
-        cli::Commands::Find { query, json } => {
+        cli::Commands::Find {
+            query,
+            include,
+            exclude,
+            role,
+            match_mode,
+            json,
+        } => {
             let started = std::time::Instant::now();
             let repo = repo::discover()?;
             let loaded = index::load(&repo)?;
@@ -37,8 +44,26 @@ fn run() -> Result<()> {
                 "not_applicable".to_string()
             };
             let search = search::run_with_index(&repo.root, &query, index_used, &index_status)?;
-            let candidates =
-                rank::rank_with_index(&query, search.matches, loaded.index.as_ref(), &index_status);
+            let role_filter = match role {
+                cli::FindRoleSelection::Source => rank::FindRoleFilter::Source,
+                cli::FindRoleSelection::Doc => rank::FindRoleFilter::Doc,
+                cli::FindRoleSelection::Config => rank::FindRoleFilter::Config,
+                cli::FindRoleSelection::Test => rank::FindRoleFilter::Test,
+                cli::FindRoleSelection::Other => rank::FindRoleFilter::Other,
+                cli::FindRoleSelection::Any => rank::FindRoleFilter::Any,
+            };
+            let match_filter = match match_mode {
+                cli::FindMatchSelection::Any => rank::FindMatchFilter::Any,
+                cli::FindMatchSelection::All => rank::FindMatchFilter::All,
+            };
+            let filters = rank::FindFilters::try_new(include, exclude, role_filter, match_filter)?;
+            let candidates = rank::rank_with_index(
+                &query,
+                search.matches,
+                loaded.index.as_ref(),
+                &index_status,
+                &filters,
+            );
             let next_actions =
                 rank::next_actions(&query, &candidates, &repo::display_path(&repo.root));
             let mut coverage = search

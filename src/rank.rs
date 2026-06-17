@@ -1,5 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use anyhow::{Context, Result};
+use globset::{Glob, GlobSet, GlobSetBuilder};
+
 use crate::index::{self, EdgeConfidence, IndexedEdge, IndexedSymbolReference, ReferenceContext};
 use crate::text::{normalize_phrase, shorten_snippet, squash_identifier, tokenize_terms};
 use crate::types::{
@@ -8,11 +11,74 @@ use crate::types::{
 
 pub const CANDIDATE_LIMIT: usize = 8;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindRoleFilter {
+    Source,
+    Doc,
+    Config,
+    Test,
+    Other,
+    Any,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindMatchFilter {
+    Any,
+    All,
+}
+
+#[derive(Debug, Clone)]
+pub struct FindFilters {
+    include: GlobMatcherSet,
+    exclude: GlobMatcherSet,
+    role: FindRoleFilter,
+    match_mode: FindMatchFilter,
+}
+
+impl FindFilters {
+    pub fn try_new(
+        include: Vec<String>,
+        exclude: Vec<String>,
+        role: FindRoleFilter,
+        match_mode: FindMatchFilter,
+    ) -> Result<Self> {
+        Ok(Self {
+            include: build_globset(include, "include")?,
+            exclude: build_globset(exclude, "exclude")?,
+            role,
+            match_mode,
+        })
+    }
+
+    fn allows(&self, path: &str, role: &str) -> bool {
+        let normalized_path = path.replace('\\', "/");
+        if !self.include.is_empty() && !self.include.is_match(&normalized_path) {
+            return false;
+        }
+        if !self.exclude.is_empty() && self.exclude.is_match(&normalized_path) {
+            return false;
+        }
+        role_matches(self.role, role)
+    }
+}
+
+impl Default for FindFilters {
+    fn default() -> Self {
+        Self {
+            include: GlobMatcherSet::empty(),
+            exclude: GlobMatcherSet::empty(),
+            role: FindRoleFilter::Any,
+            match_mode: FindMatchFilter::Any,
+        }
+    }
+}
+
 pub fn rank_with_index(
     query: &str,
     matches: Vec<SearchMatch>,
     index: Option<&index::RepoIndex>,
     index_status: &str,
+    filters: &FindFilters,
 ) -> Vec<FileCandidate> {
     let profile = QueryProfile::new(query);
     let mut grouped: BTreeMap<String, Vec<SearchMatch>> = BTreeMap::new();
@@ -21,33 +87,33 @@ pub fn rank_with_index(
         grouped.entry(item.path.clone()).or_default().push(item);
     }
 
-    let mut candidates = grouped
+    let candidates = grouped
         .into_iter()
         .map(|(path, mut matches)| {
             matches.sort_by_key(|item| item.line_number);
             build_candidate(path, matches, &profile, index, index_status)
         })
+        .filter(|ranked| filters.allows(&ranked.candidate.path, &ranked.candidate.role))
+        .filter(|ranked| match filters.match_mode {
+            FindMatchFilter::Any => true,
+            FindMatchFilter::All => ranked.matched_terms >= profile.terms.len(),
+        })
         .collect::<Vec<_>>();
 
-    candidates.sort_by(|left, right| {
-        right
-            .tier
-            .cmp(&left.tier)
-            .then_with(|| {
-                right
-                    .candidate
-                    .score
-                    .partial_cmp(&left.candidate.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .then_with(|| left.candidate.path.cmp(&right.candidate.path))
-    });
-
-    candidates
+    let mut finalized = candidates
         .into_iter()
         .map(finalize_ranked_candidate)
-        .take(CANDIDATE_LIMIT)
-        .collect()
+        .collect::<Vec<_>>();
+
+    finalized.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+
+    finalized.into_iter().take(CANDIDATE_LIMIT).collect()
 }
 
 pub fn next_actions(_query: &str, candidates: &[FileCandidate], repo_root: &str) -> Vec<String> {
@@ -72,8 +138,6 @@ struct QueryProfile {
     squashed_phrase: String,
     terms: Vec<String>,
     identifier_like: bool,
-    dependency_related: bool,
-    error_like: bool,
 }
 
 impl QueryProfile {
@@ -81,18 +145,16 @@ impl QueryProfile {
         let raw = query.trim().to_string();
         let normalized_phrase = normalize_phrase(&raw);
         let squashed_phrase = squash_identifier(&normalized_phrase);
-        let terms = tokenize_terms(&raw);
+        let mut terms = tokenize_terms(&raw);
+        terms.sort();
+        terms.dedup();
         let identifier_like = is_identifier_like(&raw, &terms);
-        let dependency_related = is_dependency_related(&raw, &terms);
-        let error_like = is_error_like(&raw, &terms);
 
         Self {
             normalized_phrase,
             squashed_phrase,
             terms,
             identifier_like,
-            dependency_related,
-            error_like,
         }
     }
 }
@@ -176,7 +238,7 @@ fn build_candidate(
         });
     }
 
-    apply_role_weight(&role, profile, &mut score, &mut evidence);
+    apply_role_weight(&role, &mut score, &mut evidence);
 
     let mut index_tier = path_shape_tier;
     if let Some(index) = index {
@@ -206,11 +268,20 @@ fn build_candidate(
         });
     }
 
-    if matched_terms.len() >= 2 {
-        score += 0.04;
+    if !profile.terms.is_empty() && !matched_terms.is_empty() {
+        let matched_term_count = matched_terms.len() as f64;
+        let missing_terms = profile.terms.len().saturating_sub(matched_terms.len()) as f64;
+        score += matched_term_count * 0.14;
+        if missing_terms > 0.0 {
+            score -= missing_terms * 0.07;
+        }
         evidence.push(Evidence {
-            evidence_type: "multi_term_match".to_string(),
-            detail: format!("matched {} query terms", matched_terms.len()),
+            evidence_type: "query_term_coverage".to_string(),
+            detail: format!(
+                "matched {} of {} query terms",
+                matched_terms.len(),
+                profile.terms.len()
+            ),
         });
     }
 
@@ -243,6 +314,7 @@ fn build_candidate(
             evidence,
         },
         tier: index_tier,
+        matched_terms: matched_terms.len(),
     }
 }
 
@@ -417,30 +489,18 @@ fn singularize_token(token: &str) -> String {
 
 fn exact_phrase_boost(role: &FileRole, profile: &QueryProfile, fixture_like: bool) -> f64 {
     let mut boost = match role {
-        FileRole::Source => {
-            if profile.error_like {
-                0.50
-            } else if profile.identifier_like {
-                0.42
-            } else {
-                0.34
-            }
-        }
-        FileRole::Doc => {
-            if profile.error_like {
-                0.18
-            } else if profile.identifier_like {
-                0.12
-            } else {
-                0.24
-            }
-        }
+        FileRole::Source => 0.34,
+        FileRole::Doc => 0.24,
         FileRole::Test => 0.18,
         FileRole::Config => 0.14,
         FileRole::Lockfile => 0.08,
-        FileRole::Generated => 0.02,
+        FileRole::Generated => 0.10,
         FileRole::Other => 0.20,
     };
+
+    if profile.identifier_like {
+        boost += 0.04;
+    }
 
     if fixture_like {
         boost -= 0.12;
@@ -450,102 +510,62 @@ fn exact_phrase_boost(role: &FileRole, profile: &QueryProfile, fixture_like: boo
 }
 
 fn near_phrase_boost(role: &FileRole, profile: &QueryProfile) -> f64 {
-    match role {
-        FileRole::Source => {
-            if profile.identifier_like {
-                0.18
-            } else {
-                0.14
-            }
-        }
-        FileRole::Doc => {
-            if profile.error_like {
-                0.04
-            } else {
-                0.08
-            }
-        }
+    let mut boost = match role {
+        FileRole::Source => 0.14,
+        FileRole::Doc => 0.08,
         FileRole::Test => 0.08,
         FileRole::Config => 0.06,
         FileRole::Lockfile => 0.02,
-        FileRole::Generated => 0.0,
+        FileRole::Generated => 0.06,
         FileRole::Other => 0.08,
+    };
+
+    if profile.identifier_like {
+        boost += 0.02;
     }
+
+    boost
 }
 
-fn apply_role_weight(
-    role: &FileRole,
-    profile: &QueryProfile,
-    score: &mut f64,
-    evidence: &mut Vec<Evidence>,
-) {
+fn apply_role_weight(role: &FileRole, score: &mut f64, evidence: &mut Vec<Evidence>) {
     match role {
         FileRole::Source => {
-            let boost = if profile.identifier_like {
-                0.16
-            } else if profile.error_like {
-                0.12
-            } else {
-                0.08
-            };
-            *score += boost;
+            *score += 0.06;
             evidence.push(Evidence {
                 evidence_type: "source_role".to_string(),
-                detail: "path suggests source implementation".to_string(),
+                detail: "path suggests source-like file role".to_string(),
             });
         }
         FileRole::Test => {
-            let boost = if profile.identifier_like { 0.04 } else { 0.02 };
-            *score += boost;
+            *score += 0.03;
             evidence.push(Evidence {
                 evidence_type: "test_role".to_string(),
-                detail: "path suggests tests".to_string(),
+                detail: "path suggests test file role".to_string(),
             });
         }
         FileRole::Doc => {
-            let delta = if profile.error_like {
-                -0.12
-            } else if profile.identifier_like {
-                -0.10
-            } else {
-                0.02
-            };
-            *score += delta;
+            *score += 0.02;
             evidence.push(Evidence {
                 evidence_type: "doc_role".to_string(),
-                detail: "path suggests documentation".to_string(),
+                detail: "path suggests documentation file role".to_string(),
             });
         }
         FileRole::Config => {
-            let boost = if profile.dependency_related {
-                0.08
-            } else {
-                0.03
-            };
-            *score += boost;
+            *score += 0.04;
             evidence.push(Evidence {
                 evidence_type: "config_role".to_string(),
-                detail: "path suggests configuration".to_string(),
+                detail: "path suggests configuration file role".to_string(),
             });
         }
         FileRole::Lockfile => {
-            let delta = if profile.dependency_related {
-                0.04
-            } else {
-                -0.28
-            };
-            *score += delta;
+            *score -= 0.10;
             evidence.push(Evidence {
                 evidence_type: "lockfile_role".to_string(),
-                detail: if profile.dependency_related {
-                    "lockfile is relevant to dependency-related query".to_string()
-                } else {
-                    "lockfile penalized for non-dependency query".to_string()
-                },
+                detail: "path suggests lockfile or dependency snapshot".to_string(),
             });
         }
         FileRole::Generated => {
-            *score -= 0.35;
+            *score -= 0.05;
             evidence.push(Evidence {
                 evidence_type: "generated_role".to_string(),
                 detail: "path suggests generated or build output".to_string(),
@@ -793,6 +813,70 @@ fn reference_matches_profile(reference: &IndexedSymbolReference, profile: &Query
         .all(|term| name_terms.iter().any(|name_term| name_term == term))
 }
 
+#[derive(Debug, Clone)]
+struct GlobMatcherSet {
+    path: GlobSet,
+    basename: GlobSet,
+}
+
+impl GlobMatcherSet {
+    fn empty() -> Self {
+        Self {
+            path: GlobSetBuilder::new()
+                .build()
+                .expect("empty globset should be valid"),
+            basename: GlobSetBuilder::new()
+                .build()
+                .expect("empty globset should be valid"),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.path.is_empty() && self.basename.is_empty()
+    }
+
+    fn is_match(&self, path: &str) -> bool {
+        let basename = path.rsplit('/').next().unwrap_or(path);
+        self.path.is_match(path) || self.basename.is_match(basename)
+    }
+}
+
+fn build_globset(patterns: Vec<String>, label: &str) -> Result<GlobMatcherSet> {
+    let mut path_builder = GlobSetBuilder::new();
+    let mut basename_builder = GlobSetBuilder::new();
+    for pattern in patterns {
+        let glob = Glob::new(&pattern)
+            .with_context(|| format!("invalid {label} glob pattern: {pattern}"))?;
+        path_builder.add(glob);
+
+        if !pattern.contains('/') && !pattern.contains('\\') {
+            let basename_glob = Glob::new(&pattern)
+                .with_context(|| format!("invalid {label} glob pattern: {pattern}"))?;
+            basename_builder.add(basename_glob);
+        }
+    }
+    Ok(GlobMatcherSet {
+        path: path_builder.build()?,
+        basename: basename_builder.build()?,
+    })
+}
+
+fn role_matches(filter: FindRoleFilter, role: &str) -> bool {
+    match filter {
+        FindRoleFilter::Any => true,
+        FindRoleFilter::Source => role == "source",
+        FindRoleFilter::Doc => role == "doc",
+        FindRoleFilter::Config => role == "config",
+        FindRoleFilter::Test => role == "test",
+        FindRoleFilter::Other => matches!(role, "other" | "lockfile" | "generated"),
+    }
+}
+
+fn is_generated_site_html(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    (lower.contains("/site/") || lower.starts_with("site/")) && lower.ends_with("index.html")
+}
+
 #[derive(Clone, Copy)]
 enum SymbolMatchStrength {
     Exact,
@@ -845,6 +929,7 @@ struct IndexSignal {
 struct RankedCandidate {
     candidate: FileCandidate,
     tier: usize,
+    matched_terms: usize,
 }
 
 fn finalize_ranked_candidate(mut ranked: RankedCandidate) -> FileCandidate {
@@ -866,8 +951,8 @@ fn finalize_ranked_candidate(mut ranked: RankedCandidate) -> FileCandidate {
         .any(|item| item.evidence_type == "indexed_edge");
 
     if tier > 0 {
-        let tier_score = tier as f64;
-        ranked.candidate.score = round_score(tier_score + ranked.candidate.score * 0.1);
+        let tier_score = tier as f64 * 0.15;
+        ranked.candidate.score = round_score((ranked.candidate.score + tier_score).max(0.0));
         ranked.candidate.confidence = if has_index_definition {
             Confidence::High
         } else if tier >= 2 || has_index_reference {
@@ -922,10 +1007,7 @@ fn confidence_for(
         return Confidence::Low;
     }
 
-    if has_strong_snippet
-        || (profile.identifier_like && role_is_source && has_exact_phrase)
-        || (profile.error_like && role_is_source && has_exact_phrase)
-    {
+    if has_strong_snippet || (profile.identifier_like && role_is_source && has_exact_phrase) {
         return Confidence::High;
     }
 
@@ -1218,44 +1300,6 @@ fn is_identifier_like(raw: &str, terms: &[String]) -> bool {
             .any(|term| term.len() >= 6 && raw.contains(term))
 }
 
-fn is_dependency_related(raw: &str, terms: &[String]) -> bool {
-    let lower = raw.to_lowercase();
-    let keywords = [
-        "dependency",
-        "dependencies",
-        "lock",
-        "lockfile",
-        "package",
-        "version",
-        "cargo",
-        "npm",
-        "yarn",
-        "pnpm",
-        "crate",
-        "crates",
-    ];
-
-    lower.contains("lockfile")
-        || terms.iter().any(|term| keywords.contains(&term.as_str()))
-        || lower.contains("package-lock")
-        || lower.contains("cargo.lock")
-}
-
-fn is_error_like(raw: &str, terms: &[String]) -> bool {
-    let lower = raw.to_lowercase();
-    lower.contains("not found")
-        || lower.contains("error")
-        || lower.contains("failed")
-        || lower.contains("missing")
-        || lower.contains("install")
-        || terms.iter().any(|term| {
-            matches!(
-                term.as_str(),
-                "error" | "failed" | "missing" | "install" | "not"
-            )
-        })
-}
-
 fn is_lockfile(path: &str) -> bool {
     let lower = path.to_lowercase();
     lower.ends_with("cargo.lock")
@@ -1300,6 +1344,7 @@ fn is_generated_path(path: &str) -> bool {
         || path.contains("/build/")
         || path.contains("/vendor/")
         || path.contains("generated")
+        || is_generated_site_html(path)
 }
 
 fn is_source_path(path: &str, file_name_tokens: &[String]) -> bool {
@@ -1451,7 +1496,13 @@ mod tests {
             match_item("src/lib.rs", 4, "rg"),
         ];
 
-        let candidates = rank_with_index("rg", matches, None, "not_applicable");
+        let candidates = rank_with_index(
+            "rg",
+            matches,
+            None,
+            "not_applicable",
+            &FindFilters::default(),
+        );
         assert_eq!(candidates.first().unwrap().path, "src/lib.rs");
         assert_ne!(candidates.first().unwrap().path, "Cargo.lock");
     }
@@ -1472,7 +1523,13 @@ mod tests {
             ),
         ];
 
-        let candidates = rank_with_index("rg was not found", matches, None, "not_applicable");
+        let candidates = rank_with_index(
+            "rg was not found",
+            matches,
+            None,
+            "not_applicable",
+            &FindFilters::default(),
+        );
         assert_eq!(candidates.first().unwrap().path, "src/search.rs");
         assert!(candidates
             .first()
@@ -1494,7 +1551,13 @@ mod tests {
             match_item("src/search.rs", 40, "return Err(anyhow!(\"rg failed\"));"),
         ];
 
-        let candidates = rank_with_index("rg was not found", matches, None, "not_applicable");
+        let candidates = rank_with_index(
+            "rg was not found",
+            matches,
+            None,
+            "not_applicable",
+            &FindFilters::default(),
+        );
         let candidate = candidates.first().unwrap();
         assert_eq!(candidate.path, "src/search.rs");
         assert!(!candidate.snippets.is_empty());
@@ -1510,7 +1573,13 @@ mod tests {
             match_item("src/main.rs", 8, "query"),
         ];
 
-        let candidates = rank_with_index("query", matches, None, "not_applicable");
+        let candidates = rank_with_index(
+            "query",
+            matches,
+            None,
+            "not_applicable",
+            &FindFilters::default(),
+        );
         assert_eq!(candidates.first().unwrap().path, "src/main.rs");
         let cargo = candidates
             .iter()
@@ -1530,7 +1599,13 @@ mod tests {
             match_item("src/types.rs", 20, "pub struct LineRanges;"),
         ];
 
-        let candidates = rank_with_index("line_ranges", matches, None, "not_applicable");
+        let candidates = rank_with_index(
+            "line_ranges",
+            matches,
+            None,
+            "not_applicable",
+            &FindFilters::default(),
+        );
         assert_eq!(candidates.first().unwrap().path, "src/types.rs");
         assert_eq!(candidates.first().unwrap().role, "source");
     }
@@ -1547,7 +1622,13 @@ mod tests {
             match_item("src/main.rs", 30, "third line"),
         ];
 
-        let candidates = rank_with_index("snippet", matches, None, "not_applicable");
+        let candidates = rank_with_index(
+            "snippet",
+            matches,
+            None,
+            "not_applicable",
+            &FindFilters::default(),
+        );
         let snippets = &candidates.first().unwrap().snippets;
         assert!(!snippets.is_empty());
         assert!(snippets.iter().all(|snippet| snippet.text.len() <= 88));
@@ -1566,10 +1647,22 @@ mod tests {
             match_item("docs/README.md", 200, "report"),
         ];
 
-        let strong_candidate =
-            rank_with_index("SearchReport", strong, None, "not_applicable").remove(0);
-        let weak_candidate =
-            rank_with_index("search report", weak, None, "not_applicable").remove(0);
+        let strong_candidate = rank_with_index(
+            "SearchReport",
+            strong,
+            None,
+            "not_applicable",
+            &FindFilters::default(),
+        )
+        .remove(0);
+        let weak_candidate = rank_with_index(
+            "search report",
+            weak,
+            None,
+            "not_applicable",
+            &FindFilters::default(),
+        )
+        .remove(0);
 
         assert_eq!(strong_candidate.confidence, Confidence::High);
         assert_eq!(weak_candidate.confidence, Confidence::Low);
@@ -1643,7 +1736,13 @@ mod tests {
             ],
         );
 
-        let candidates = rank_with_index("SearchResult", matches, Some(&index), "fresh");
+        let candidates = rank_with_index(
+            "SearchResult",
+            matches,
+            Some(&index),
+            "fresh",
+            &FindFilters::default(),
+        );
         assert_eq!(candidates.first().unwrap().path, "src/search.rs");
         assert!(candidates
             .first()
@@ -1674,7 +1773,13 @@ mod tests {
             ],
         );
 
-        let candidates = rank_with_index("meeting session", matches, Some(&index), "fresh");
+        let candidates = rank_with_index(
+            "meeting session",
+            matches,
+            Some(&index),
+            "fresh",
+            &FindFilters::default(),
+        );
         assert_eq!(candidates.first().unwrap().path, "app/meeting_session.py");
         assert_ne!(candidates.first().unwrap().path, "app/models.py");
     }
@@ -1747,7 +1852,13 @@ mod tests {
             ],
         );
 
-        let candidates = rank_with_index("SearchCoverage", matches, Some(&index), "fresh");
+        let candidates = rank_with_index(
+            "SearchCoverage",
+            matches,
+            Some(&index),
+            "fresh",
+            &FindFilters::default(),
+        );
         assert_eq!(candidates.first().unwrap().path, "src/types.rs");
         assert!(candidates
             .first()
@@ -1758,7 +1869,7 @@ mod tests {
     }
 
     #[test]
-    fn rg_error_query_still_prefers_source_even_with_index_noise() {
+    fn stronger_source_matches_outrank_doc_noise() {
         let matches = vec![
             match_item("docs/PROJECT.md", 20, "rg was not found on PATH"),
             match_item(
@@ -1794,7 +1905,246 @@ mod tests {
             ],
         );
 
-        let candidates = rank_with_index("rg was not found", matches, Some(&index), "fresh");
+        let candidates = rank_with_index(
+            "rg was not found",
+            matches,
+            Some(&index),
+            "fresh",
+            &FindFilters::default(),
+        );
         assert_eq!(candidates.first().unwrap().path, "src/search.rs");
+    }
+
+    #[test]
+    fn filters_include_exclude_and_role_limit_displayed_candidates() {
+        let matches = vec![
+            match_item("site/generated/index.html", 1, "download"),
+            match_item("src/main.rs", 2, "download"),
+            match_item("docs/README.md", 3, "download"),
+        ];
+        let include_css = FindFilters::try_new(
+            vec!["**/*.html".to_string()],
+            vec!["site/**".to_string()],
+            FindRoleFilter::Any,
+            FindMatchFilter::Any,
+        )
+        .unwrap();
+        let source_only =
+            FindFilters::try_new(vec![], vec![], FindRoleFilter::Source, FindMatchFilter::Any)
+                .unwrap();
+
+        let excluded = rank_with_index(
+            "download",
+            vec![
+                match_item("site/generated/index.html", 1, "download"),
+                match_item("src/main.rs", 2, "download"),
+                match_item("docs/README.md", 3, "download"),
+            ],
+            None,
+            "not_applicable",
+            &include_css,
+        );
+        assert!(excluded.is_empty());
+
+        let filtered = rank_with_index("download", matches, None, "not_applicable", &source_only);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].path, "src/main.rs");
+    }
+
+    #[test]
+    fn explicit_include_allows_css_results() {
+        let matches = vec![
+            match_item("src/main.ts", 1, "background"),
+            match_item("src/styles/site.css", 4, "background: #fff;"),
+        ];
+        let css_only = FindFilters::try_new(
+            vec!["*.css".to_string()],
+            vec![],
+            FindRoleFilter::Any,
+            FindMatchFilter::Any,
+        )
+        .unwrap();
+
+        let candidates = rank_with_index("background", matches, None, "not_applicable", &css_only);
+
+        assert_eq!(candidates.first().unwrap().path, "src/styles/site.css");
+    }
+
+    #[test]
+    fn double_star_include_also_matches_nested_css() {
+        let matches = vec![
+            match_item("src/main.ts", 1, "background"),
+            match_item("src/popup/popup.css", 4, "background: #fff;"),
+        ];
+        let css_only = FindFilters::try_new(
+            vec!["**/*.css".to_string()],
+            vec![],
+            FindRoleFilter::Any,
+            FindMatchFilter::Any,
+        )
+        .unwrap();
+
+        let candidates = rank_with_index("background", matches, None, "not_applicable", &css_only);
+
+        assert_eq!(candidates.first().unwrap().path, "src/popup/popup.css");
+    }
+
+    #[test]
+    fn path_specific_include_matches_nested_css() {
+        let matches = vec![
+            match_item("src/main.ts", 1, "background"),
+            match_item("src/options/options.css", 4, "background: #fff;"),
+        ];
+        let css_only = FindFilters::try_new(
+            vec!["src/**/*.css".to_string()],
+            vec![],
+            FindRoleFilter::Any,
+            FindMatchFilter::Any,
+        )
+        .unwrap();
+
+        let candidates = rank_with_index("background", matches, None, "not_applicable", &css_only);
+
+        assert_eq!(candidates.first().unwrap().path, "src/options/options.css");
+    }
+
+    #[test]
+    fn exclude_globs_remove_nested_css() {
+        let matches = vec![
+            match_item("src/main.ts", 1, "background"),
+            match_item("src/popup/popup.css", 4, "background: #fff;"),
+        ];
+        let filters = FindFilters::try_new(
+            vec![],
+            vec!["*.css".to_string()],
+            FindRoleFilter::Any,
+            FindMatchFilter::Any,
+        )
+        .unwrap();
+
+        let candidates = rank_with_index("background", matches, None, "not_applicable", &filters);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].path, "src/main.ts");
+    }
+
+    #[test]
+    fn multi_term_coverage_beats_one_term_incidental_match() {
+        let matches = vec![
+            match_item("src/styles/site.css", 12, "background: #111;"),
+            match_item(
+                "src/mixed/file.ts",
+                8,
+                "background script registers handler",
+            ),
+            match_item("manifest.json", 4, "\"background\": {"),
+        ];
+        let index = repo_index(
+            vec![],
+            vec![],
+            vec![IndexedEdge {
+                edge_type: "references".to_string(),
+                from: "manifest.json".to_string(),
+                to: "src/mixed/file.ts".to_string(),
+                confidence: EdgeConfidence::Extracted,
+                reason: "manifest background.service_worker references src/mixed/file.ts"
+                    .to_string(),
+            }],
+            vec![
+                indexed_file("manifest.json", IndexFileRole::Config),
+                indexed_file("src/mixed/file.ts", IndexFileRole::Source),
+                indexed_file("src/styles/site.css", IndexFileRole::Source),
+            ],
+        );
+
+        let candidates = rank_with_index(
+            "background script",
+            matches,
+            Some(&index),
+            "fresh",
+            &FindFilters::default(),
+        );
+
+        assert_eq!(candidates.first().unwrap().path, "src/mixed/file.ts");
+        assert!(
+            candidates
+                .iter()
+                .find(|candidate| candidate.path == "src/styles/site.css")
+                .map(|candidate| candidate.score)
+                .unwrap()
+                < candidates.first().unwrap().score
+        );
+    }
+
+    #[test]
+    fn match_all_filters_out_partial_matches() {
+        let matches = vec![
+            match_item("src/styles/site.css", 12, "background: #111;"),
+            match_item(
+                "src/mixed/file.ts",
+                8,
+                "background script registers handler",
+            ),
+            match_item("manifest.json", 4, "\"background\": {"),
+        ];
+        let filters =
+            FindFilters::try_new(vec![], vec![], FindRoleFilter::Any, FindMatchFilter::All)
+                .unwrap();
+
+        let candidates = rank_with_index(
+            "background script",
+            matches,
+            None,
+            "not_applicable",
+            &filters,
+        );
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].path, "src/mixed/file.ts");
+    }
+
+    #[test]
+    fn css_is_not_globally_penalized() {
+        let matches = vec![
+            match_item("src/main.ts", 1, "background"),
+            match_item("src/styles/site.css", 4, "background color: #fff;"),
+        ];
+
+        let candidates = rank_with_index(
+            "background color",
+            matches,
+            None,
+            "not_applicable",
+            &FindFilters::default(),
+        );
+
+        assert_eq!(candidates.first().unwrap().path, "src/styles/site.css");
+    }
+
+    #[test]
+    fn generated_files_are_lower_evidence_not_hidden() {
+        let matches = vec![
+            match_item("site/docs/index.html", 18, "route handler"),
+            match_item("src/routes/handler.ts", 12, "route handler"),
+        ];
+        let index = repo_index(
+            vec![],
+            vec![],
+            vec![],
+            vec![
+                indexed_file("site/docs/index.html", IndexFileRole::Generated),
+                indexed_file("src/routes/handler.ts", IndexFileRole::Source),
+            ],
+        );
+
+        let candidates = rank_with_index(
+            "route handler",
+            matches,
+            Some(&index),
+            "fresh",
+            &FindFilters::default(),
+        );
+
+        assert_eq!(candidates.first().unwrap().path, "src/routes/handler.ts");
     }
 }

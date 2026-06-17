@@ -31,6 +31,10 @@ Agentgrep sits on top of that recall floor and makes the first pass more agent-s
 
 - it groups matches by file;
 - it ranks likely files with explainable heuristics;
+- it supports `--match any` and `--match all` for broad recall or stricter coverage;
+- it does not guess file intent from query words;
+- `--include`, `--exclude`, and `--role` narrow results explicitly;
+- bare globs like `*.css` match by basename anywhere, while `src/**/*.css` stays path-specific;
 - it keeps line numbers and snippets attached;
 - it can use an optional local index to improve ranking and context;
 - it can print stable JSON for downstream tools.
@@ -55,6 +59,9 @@ cargo build
 
 ```bash
 agentgrep find "query"
+agentgrep find "query" --match all
+agentgrep find "query" --include "*.css"
+agentgrep find "query" --role source
 agentgrep find "query" --json
 agentgrep index
 ```

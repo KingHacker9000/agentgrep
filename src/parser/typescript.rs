@@ -60,6 +60,19 @@ fn walk_ts_node(
                             ),
                         });
                     }
+                    if let Some(default_import) = ts_default_import(node, source) {
+                        facts.symbol_references.push(ImportBinding {
+                            from_file: file_path.to_string(),
+                            symbol_name: default_import,
+                            target_file: Some(target.clone()),
+                            line_number: node.start_position().row + 1,
+                            confidence: EdgeConfidence::Extracted,
+                            reason: format!(
+                                "default import binding from {}",
+                                normalize_path(&target)
+                            ),
+                        });
+                    }
                 }
             }
         }
@@ -236,13 +249,32 @@ fn ts_named_imports(node: Node, source: &str) -> Vec<String> {
             if let Some((before_as, _)) = item.split_once(" as ") {
                 item = before_as.trim();
             }
-            if item.is_empty() || item == "*" {
+            if item.is_empty() || item == "*" || item == "default" {
                 None
             } else {
                 Some(item.to_string())
             }
         })
         .collect()
+}
+
+fn ts_default_import(node: Node, source: &str) -> Option<String> {
+    let text = node.utf8_text(source.as_bytes()).ok()?.trim();
+    let clause = text.strip_prefix("import")?.trim();
+    let clause = clause
+        .split_once(" from ")
+        .map(|(before, _)| before.trim())
+        .unwrap_or(clause);
+    if clause.starts_with('{') || clause.starts_with('*') {
+        return None;
+    }
+
+    let default = clause.split(',').next()?.trim();
+    if default.is_empty() || default == "type" {
+        None
+    } else {
+        Some(default.trim_start_matches("type ").trim().to_string())
+    }
 }
 
 fn string_literal_text(node: Node, source: &str) -> Option<String> {
@@ -366,5 +398,22 @@ export class View {}
             &lookup(&["src/view.tsx", "src/react.tsx"]),
         );
         assert!(facts.symbols.iter().any(|symbol| symbol.name == "View"));
+    }
+
+    #[test]
+    fn extracts_default_import_binding_refs() {
+        let source = r#"
+import App from "./App";
+"#;
+        let facts = extract_file_facts(
+            "src/main.tsx",
+            source,
+            &lookup(&["src/main.tsx", "src/App.tsx"]),
+        );
+        assert!(facts
+            .symbol_references
+            .iter()
+            .any(|binding| binding.symbol_name == "App"
+                && binding.target_file.as_deref() == Some("src/App.tsx")));
     }
 }

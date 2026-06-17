@@ -1,4 +1,5 @@
 pub mod extracted;
+pub mod go;
 pub mod javascript;
 pub mod language;
 pub mod python;
@@ -32,6 +33,7 @@ pub fn extract_repo_facts(
 
         let file_facts = match language {
             language::LanguageKind::Rust => rust::extract_file_facts(&file.path, source, &lookup),
+            language::LanguageKind::Go => go::extract_file_facts(&file.path, source, &lookup),
             language::LanguageKind::Python => {
                 python::extract_file_facts(&file.path, source, &lookup)
             }

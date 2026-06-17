@@ -13,9 +13,11 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::parser::extracted::{dedup_edges, dedup_symbols, ImportBinding};
+use crate::parser::language::{parent_dir, RepoLookup};
 use crate::repo::{display_path, RepoInfo};
 use crate::text::shorten_snippet;
 use crate::types::{IndexedSymbol, SymbolKind, Visibility};
+use serde_json::Value;
 
 pub const INDEX_SCHEMA_VERSION: u32 = 5;
 pub const HASH_LIMIT_BYTES: u64 = 1024 * 256;
@@ -491,7 +493,7 @@ fn build_index(repo: &RepoInfo) -> Result<RepoIndex> {
     let symbol_reference_count = symbol_references.len();
     edges.extend(build_same_area_edges(&files));
     edges.extend(build_test_edges(&files, &source_paths));
-    edges.extend(build_config_edges(&files, &source_paths));
+    edges.extend(build_config_edges(&repo.root, &files, &source_paths));
     dedup_edges(&mut edges);
     let connection_count = edges.len();
 
@@ -570,9 +572,14 @@ fn build_test_edges(files: &[IndexedFile], source_paths: &[String]) -> Vec<Index
     edges
 }
 
-fn build_config_edges(files: &[IndexedFile], source_paths: &[String]) -> Vec<IndexedEdge> {
+fn build_config_edges(
+    repo_root: &Path,
+    files: &[IndexedFile],
+    source_paths: &[String],
+) -> Vec<IndexedEdge> {
     let mut edges = Vec::new();
     let source_roots = choose_source_roots(source_paths);
+    let lookup = RepoLookup::new(files);
 
     for file in files
         .iter()
@@ -587,9 +594,194 @@ fn build_config_edges(files: &[IndexedFile], source_paths: &[String]) -> Vec<Ind
                 reason: "manifest or config points at source root".to_string(),
             });
         }
+
+        if is_browser_extension_manifest(&file.path) {
+            let manifest_path = repo_root.join(&file.path);
+            if let Ok(text) = fs::read_to_string(&manifest_path) {
+                edges.extend(build_manifest_edges(&file.path, &text, &lookup));
+            }
+        }
     }
 
     edges
+}
+
+fn build_manifest_edges(file_path: &str, source: &str, lookup: &RepoLookup) -> Vec<IndexedEdge> {
+    let Ok(value) = serde_json::from_str::<Value>(source) else {
+        return Vec::new();
+    };
+
+    let mut edges = Vec::new();
+    let base_dir = parent_dir(file_path);
+
+    if let Some(background) = value.get("background").and_then(|item| item.as_object()) {
+        if let Some(service_worker) = background
+            .get("service_worker")
+            .and_then(|value| value.as_str())
+        {
+            push_manifest_reference(
+                &mut edges,
+                file_path,
+                &base_dir,
+                service_worker,
+                "background.service_worker",
+                lookup,
+            );
+        }
+
+        if let Some(scripts) = background.get("scripts").and_then(|value| value.as_array()) {
+            for script in scripts.iter().filter_map(|value| value.as_str()) {
+                push_manifest_reference(
+                    &mut edges,
+                    file_path,
+                    &base_dir,
+                    script,
+                    "background.scripts",
+                    lookup,
+                );
+            }
+        }
+    }
+
+    if let Some(content_scripts) = value
+        .get("content_scripts")
+        .and_then(|value| value.as_array())
+    {
+        for entry in content_scripts.iter().filter_map(|value| value.as_object()) {
+            if let Some(js_files) = entry.get("js").and_then(|value| value.as_array()) {
+                for script in js_files.iter().filter_map(|value| value.as_str()) {
+                    push_manifest_reference(
+                        &mut edges,
+                        file_path,
+                        &base_dir,
+                        script,
+                        "content_scripts.js",
+                        lookup,
+                    );
+                }
+            }
+
+            if let Some(css_files) = entry.get("css").and_then(|value| value.as_array()) {
+                for stylesheet in css_files.iter().filter_map(|value| value.as_str()) {
+                    push_manifest_reference(
+                        &mut edges,
+                        file_path,
+                        &base_dir,
+                        stylesheet,
+                        "content_scripts.css",
+                        lookup,
+                    );
+                }
+            }
+        }
+    }
+
+    edges
+}
+
+fn push_manifest_reference(
+    edges: &mut Vec<IndexedEdge>,
+    file_path: &str,
+    base_dir: &str,
+    raw_path: &str,
+    field_name: &str,
+    lookup: &RepoLookup,
+) {
+    if let Some(target) = resolve_manifest_target(base_dir, raw_path, lookup) {
+        edges.push(IndexedEdge {
+            edge_type: "references".to_string(),
+            from: file_path.to_string(),
+            to: target.clone(),
+            confidence: EdgeConfidence::Extracted,
+            reason: format!(
+                "manifest {field_name} references {}",
+                display_path(std::path::Path::new(&target))
+            ),
+        });
+    }
+}
+
+fn resolve_manifest_target(base_dir: &str, raw_path: &str, lookup: &RepoLookup) -> Option<String> {
+    let normalized = raw_path.trim().trim_matches('"').trim_matches('\'');
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let mut candidates = Vec::new();
+    let joined = if normalized.starts_with("./") || normalized.starts_with("../") {
+        let joined = std::path::Path::new(base_dir).join(normalized);
+        display_path(&joined)
+    } else if normalized.starts_with('/') {
+        normalized.trim_start_matches('/').to_string()
+    } else if base_dir.is_empty() {
+        normalized.to_string()
+    } else {
+        format!("{base_dir}/{normalized}")
+    };
+
+    push_path_variants(&mut candidates, &joined);
+    if joined != normalized {
+        push_path_variants(&mut candidates, normalized);
+    }
+
+    if let Some(target) = lookup.resolve_candidates(candidates.clone()) {
+        return Some(target);
+    }
+
+    resolve_by_stem(lookup, &candidates)
+}
+
+fn push_path_variants(candidates: &mut Vec<String>, path: &str) {
+    let normalized = path.replace('\\', "/");
+    let stem = normalized
+        .rsplit_once('.')
+        .map(|(head, _)| head)
+        .unwrap_or(normalized.as_str());
+
+    candidates.push(normalized.clone());
+    if stem != normalized {
+        for ext in [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"] {
+            candidates.push(format!("{stem}{ext}"));
+        }
+    } else {
+        for ext in [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"] {
+            candidates.push(format!("{normalized}{ext}"));
+        }
+        for ext in [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"] {
+            candidates.push(format!("{normalized}/index{ext}"));
+        }
+    }
+}
+
+fn resolve_by_stem(lookup: &RepoLookup, candidates: &[String]) -> Option<String> {
+    let stems = candidates
+        .iter()
+        .map(|candidate| {
+            candidate
+                .rsplit_once('.')
+                .map(|(head, _)| head.to_string())
+                .unwrap_or_else(|| candidate.clone())
+        })
+        .collect::<Vec<_>>();
+
+    for stem in stems {
+        for ext in [
+            ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".css", ".html",
+        ] {
+            let candidate = format!("{stem}{ext}");
+            if let Some(target) = lookup.resolve_candidates([candidate.clone()]) {
+                return Some(target);
+            }
+        }
+        for ext in [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"] {
+            let candidate = format!("{stem}/index{ext}");
+            if let Some(target) = lookup.resolve_candidates([candidate.clone()]) {
+                return Some(target);
+            }
+        }
+    }
+
+    None
 }
 
 pub(crate) fn build_rust_symbols(
@@ -2228,6 +2420,16 @@ fn is_generated_path(path: &str) -> bool {
         || path.contains("/build/")
         || path.contains("/vendor/")
         || path.contains("generated")
+        || is_generated_site_path(path)
+}
+
+fn is_generated_site_path(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    (lower.starts_with("site/") || lower.contains("/site/")) && lower.ends_with("index.html")
+}
+
+fn is_browser_extension_manifest(path: &str) -> bool {
+    path.to_lowercase().ends_with("manifest.json")
 }
 
 #[cfg(test)]
@@ -2312,6 +2514,7 @@ mod tests {
         assert_eq!(classify_role("docs/README.md"), FileRole::Doc);
         assert_eq!(classify_role("Cargo.toml"), FileRole::Config);
         assert_eq!(classify_role("Cargo.lock"), FileRole::Lockfile);
+        assert_eq!(classify_role("site/docs/index.html"), FileRole::Generated);
     }
 
     #[test]
@@ -2363,6 +2566,47 @@ mod tests {
                 && reference.target_file.as_deref() == Some("app/llm_client.py")
         }));
         assert!(index.stats.symbol_reference_count > 0);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn builds_manifest_edges_for_background_and_content_scripts() {
+        let base = unique_temp_dir("manifest-edges");
+        fs::create_dir_all(base.join(".git")).unwrap();
+        write_file(
+            &base,
+            "manifest.json",
+            r#"{
+  "background": { "service_worker": "src/background/serviceWorker.ts" },
+  "content_scripts": [
+    {
+      "js": ["src/content/contentScript.ts"],
+      "css": ["src/content/contentScript.css"]
+    }
+  ]
+}"#,
+        );
+        write_file(&base, "src/background/serviceWorker.ts", "export {};\n");
+        write_file(&base, "src/content/contentScript.ts", "export {};\n");
+        write_file(&base, "src/content/contentScript.css", "body {}\n");
+
+        let repo = RepoInfo {
+            root: base.clone(),
+            rev: Some("abc".to_string()),
+            git_dir: Some(base.join(".git")),
+        };
+
+        let index = build_index(&repo).unwrap();
+        assert!(index.edges.iter().any(|edge| {
+            edge.from == "manifest.json"
+                && edge.to == "src/background/serviceWorker.ts"
+                && edge.edge_type == "references"
+        }));
+        assert!(index.edges.iter().any(|edge| {
+            edge.from == "manifest.json"
+                && edge.to == "src/content/contentScript.ts"
+                && edge.edge_type == "references"
+        }));
         let _ = fs::remove_dir_all(base);
     }
 

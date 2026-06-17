@@ -8,6 +8,7 @@ use crate::index::IndexedFile;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LanguageKind {
     Rust,
+    Go,
     Python,
     JavaScript,
     TypeScript,
@@ -18,6 +19,9 @@ pub fn detect_language(path: &str) -> Option<LanguageKind> {
     let lower = path.to_lowercase();
     if lower.ends_with(".rs") {
         return Some(LanguageKind::Rust);
+    }
+    if lower.ends_with(".go") {
+        return Some(LanguageKind::Go);
     }
     if lower.ends_with(".py") {
         return Some(LanguageKind::Python);
