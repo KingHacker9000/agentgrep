@@ -4,17 +4,75 @@ This guide explains how coding agents should use Agentgrep.
 
 Agentgrep is a fast local code radar. It gives agents ranked evidence, file context, symbol context, related files, and conservative impact estimates without requiring a daemon, LLM, database server, or background service.
 
-## Remaining milestone checklist
+## Current milestone: Packaging / integrations
 
+Completed milestones:
+
+- [x] MVP core command loop
 - [x] Release hardening
 - [x] JSON contract stabilization
+- [x] Retrieval v2: BM25-style lexical ranking, identifier expansion, graph boosts
+- [x] Tree-sitter multi-language indexing (Rust, Python, JS, TS, Go)
 - [ ] Dogfood on real repos
 - [ ] Config file
-- [ ] Retrieval v2: BM25 / FTS / identifier expansion / graph boosts
-- [ ] Tree-sitter Rust backend
 - [ ] Optional hybrid semantic mode behind a flag
-- [ ] Multi-language support
-- [ ] Packaging / integrations
+- [x] Packaging / integrations (current milestone)
+
+## When to use `rg` directly vs agentgrep
+
+Use `rg` when:
+
+- you know the exact string and want raw match lines;
+- you are piping output to another tool;
+- you need one-off grep speed with no ranking;
+- you need regex power over raw text.
+
+Use `agentgrep find` when:
+
+- you want ranked file candidates, not raw lines;
+- you want structured JSON for downstream use;
+- you want symbol/graph context alongside matches;
+- you want `--match all` for multi-term coverage;
+- you want `--role source` to filter by file role;
+- you want `next_actions` to guide follow-up.
+
+Rule of thumb: `rg` is the recall floor. `agentgrep` sits above it and makes results agent-shaped.
+
+## No-index mode vs indexed mode
+
+### No-index mode
+
+`find` works with `rg` only, even without an index.
+
+When no index exists:
+
+- `find` works with rg-backed ranking;
+- `map`, `symbol`, `related`, `blast` have limited or no graph context;
+- some evidence signals are absent.
+
+Useful when: first contact with a repo, quick targeted search, simple error-message lookup.
+
+### Indexed mode
+
+Run `agentgrep index` once to build the local index.
+
+When the index is present:
+
+- `find` gains symbol-name boosts and graph context;
+- `map` shows incoming/outgoing edges;
+- `symbol` reports definitions and references;
+- `related` uses import/reference edges;
+- `blast` gives a more precise impact estimate.
+
+The index is local, disposable, and rebuildable at any time. It is stored under `.git/` or `.agentgrep/` depending on the repo.
+
+Check freshness:
+
+```bash
+agentgrep index --status
+```
+
+Rebuild if stale.
 
 ## Agent usage principles
 
@@ -355,16 +413,86 @@ For a refactor:
 6. run wider tests/checks
 ```
 
+## Claude Code / Codex prompt examples
+
+### Claude Code (tool description style)
+
+When configuring agentgrep as a tool in Claude Code, describe it like this:
+
+```
+agentgrep find <query>
+  Searches the codebase for files likely related to the query.
+  Returns ranked file candidates with line snippets and evidence.
+  Use before reading large parts of the repo.
+  Use --json for structured output.
+
+agentgrep index
+  Builds a lightweight local index of symbols, imports, and file edges.
+  Run once before using map, symbol, related, or blast.
+  Use --status to check freshness.
+
+agentgrep map <file>
+  Returns the symbol/edge context for one file.
+  Shows incoming callers, outgoing dependencies, and next actions.
+
+agentgrep symbol <name>
+  Finds definitions and references for a symbol by name.
+  Reports production vs test usage.
+
+agentgrep related <file-or-symbol>
+  Returns files connected by imports, references, or symbols.
+  Use before editing to understand neighborhood.
+
+agentgrep blast <file-or-symbol>
+  Returns a conservative likely-impact estimate.
+  Use before editing to see what else might break.
+  risk_level: low | medium | high
+```
+
+### Typical Claude Code usage sequence
+
+```bash
+# Step 1: Localize likely files
+agentgrep find "auth redirect" --json
+
+# Step 2: Build index if not fresh
+agentgrep index --status
+agentgrep index
+
+# Step 3: Inspect a candidate file
+agentgrep map src/auth.rs --json
+
+# Step 4: Trace a symbol
+agentgrep symbol AuthState --json
+
+# Step 5: Check neighbors before editing
+agentgrep related src/auth.rs --json
+
+# Step 6: Estimate impact before editing
+agentgrep blast src/auth.rs --json
+```
+
+### Codex / OpenAI Assistants system prompt snippet
+
+```
+Available local tools:
+- agentgrep find "<query>" [--json] — ranked file search over the codebase
+- agentgrep index [--status] — build or check the local code index
+- agentgrep map <file> [--json] — file-level symbol and edge context
+- agentgrep symbol <name> [--json] — definitions and references for a name
+- agentgrep related <file-or-symbol> [--json] — connected files by edges
+- agentgrep blast <file-or-symbol> [--json] — conservative change impact
+
+Use agentgrep find before opening files. Use agentgrep blast before editing.
+Always use --json when you need to parse the output programmatically.
+```
+
 ## Future agent-facing improvements
 
 Planned future work:
 
 - config file for output limits and excludes;
-- BM25/FTS lexical retrieval for stronger default `find`;
-- Tree-sitter Rust backend for cleaner symbols/references;
-- optional hybrid semantic mode behind an explicit flag;
-- multi-language support;
-- packaging/integrations.
+- optional hybrid semantic mode behind an explicit flag.
 
 Not planned for core:
 

@@ -1,17 +1,16 @@
 # Agentgrep Roadmap
 
-## Current milestone checklist
+## Current milestone: Packaging / integrations
 
 - [x] MVP core command loop
 - [x] Release hardening
 - [x] JSON contract stabilization
+- [x] Retrieval v2: BM25-style lexical ranking, identifier expansion, graph boosts
+- [x] Tree-sitter multi-language indexing (Rust, Python, JS, TS, Go)
+- [x] Packaging / integrations (current milestone)
 - [ ] Dogfood on real repos
 - [ ] Config file
-- [ ] Retrieval v2: BM25 / FTS / identifier expansion / graph boosts
-- [ ] Tree-sitter Rust backend
 - [ ] Optional hybrid semantic mode behind a flag
-- [ ] Multi-language support
-- [ ] Packaging / integrations
 
 ## Current status
 
@@ -271,7 +270,7 @@ Exit criteria:
 
 ## Milestone 6 — Retrieval v2: BM25 / FTS / identifier expansion / graph boosts
 
-Status: planned.
+Status: complete.
 
 Goal:
 
@@ -318,9 +317,9 @@ Exit criteria:
 - indexed lexical candidates do not swamp exact symbol/text matches;
 - JSON contract remains stable at top level.
 
-## Milestone 7 — Tree-sitter Rust backend
+## Milestone 7 — Tree-sitter multi-language indexing
 
-Status: planned.
+Status: complete.
 
 Goal:
 
@@ -392,7 +391,7 @@ Exit criteria:
 
 ## Milestone 9 — Multi-language support
 
-Status: planned.
+Status: complete (covered in Milestone 7).
 
 Goal:
 
@@ -430,7 +429,7 @@ Exit criteria:
 
 ## Milestone 10 — Packaging / integrations
 
-Status: planned.
+Status: current.
 
 Goal:
 
