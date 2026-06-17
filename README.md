@@ -167,6 +167,17 @@ Agentgrep is not:
 - a semantic search engine;
 - a replacement for `rg`.
 
+## Agent skill docs
+
+Instructions and workflow templates for using Agentgrep in agentic coding environments:
+
+- [skill-docs/generic-agent.md](./skill-docs/generic-agent.md) — neutral instructions usable by any coding agent
+- [skill-docs/claude.md](./skill-docs/claude.md) — Claude Code-style agent loops and examples
+- [skill-docs/codex.md](./skill-docs/codex.md) — Codex-style terminal agent instructions
+- [skill-docs/skill-template.md](./skill-docs/skill-template.md) — reusable skill template for other agents
+
+See also: [docs/AGENTS.md](./docs/AGENTS.md) for the full command reference.
+
 ## Release checklist
 
 Before a release, run:
