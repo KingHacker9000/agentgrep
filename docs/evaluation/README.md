@@ -87,30 +87,37 @@ What it adds over Mode B:
 
 ---
 
-### Mode D — agentgrep, indexed + semantic (flags exist; provider not yet configured)
+### Mode D — agentgrep, indexed + semantic (active, experimental)
 
-**Semantic retrieval is not yet active. Do not present as available or benchmarked.**
-
-The CLI flags exist and are accepted:
+Semantic retrieval is **active** behind the `--semantic` flag. Provider: fastembed, model BAAI/bge-small-en-v1.5.
 
 ```bash
+# Build semantic index (prompts for ~130 MB model download on first run)
 agentgrep index --semantic
+# or: agentgrep index --semantic --yes   (non-interactive)
+
+# Semantic-expanded find
 agentgrep find --semantic "where is auth state restored"
+agentgrep find --semantic "SearchResult" --json
 ```
 
-Current behavior: both commands return a clear error explaining that no local embedding
-provider is configured. No silent fallback to deterministic mode.
+What it adds over Mode C:
 
-Rules when a provider is eventually configured:
+- query is embedded and compared against pre-computed file vectors;
+- semantic candidates are merged with deterministic candidates and labeled with `"semantic_match"` evidence;
+- `coverage.semantic_status` is `"active"` when semantic contributed;
+- deterministic evidence still dominates ranking.
 
-- disabled by default;
-- explicit flag required;
-- local-only embeddings;
-- no always-running model;
+Rules (unchanged from design):
+
+- disabled by default (explicit `--semantic` required);
+- local-only embeddings (no cloud API);
+- no always-running model or daemon;
 - no GPU required;
-- semantic evidence labeled separately (`"semantic_match"` in candidate evidence);
-- `coverage.semantic_status` changes from `"not_requested"` to `"active"`;
+- semantic evidence labeled separately from deterministic evidence;
 - default deterministic behavior unchanged.
+
+**No formal evaluation results yet.** Mode D is experimental. Measure it against Mode C before drawing conclusions. See `docs/SEMANTIC.md` for limitations.
 
 ---
 

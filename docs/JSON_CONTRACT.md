@@ -296,22 +296,40 @@ Notes:
 - `score` on impacted files is only comparable within this response.
 - `confidence` stays coarse and should not be treated as exact probability.
 
-## `--semantic` flag (experimental, not yet active)
+## `--semantic` flag (experimental, opt-in)
 
-`find --semantic` and `index --semantic` are accepted flags but semantic retrieval is not yet configured. Both return a clear error when `--semantic` is passed:
+`find --semantic` and `index --semantic` are active in this release.
 
+Provider: **fastembed**, model **BAAI/bge-small-en-v1.5** (384 dimensions, CPU-only, no GPU required).
+
+### Workflow
+
+```bash
+# Step 1: build the normal index (required first)
+agentgrep index
+
+# Step 2: build the semantic index (prompts for ~130 MB model download on first run)
+agentgrep index --semantic
+# or accept silently in CI / scripts:
+agentgrep index --semantic --yes
+
+# Step 3: semantic-expanded find
+agentgrep find "where is the embedding provider configured" --semantic
 ```
-`agentgrep find --semantic` is not yet available: no local embedding provider is configured.
-Use `agentgrep find` without --semantic for deterministic search.
-See ROADMAP.md Milestone 8 for the planned implementation.
-```
 
-When semantic becomes active in a future release:
+### Behavior
 
-- `coverage.semantic_status` will change from `"not_requested"` to `"active"`.
-- Evidence entries with type `"semantic_match"` will appear in candidate evidence.
-- Semantic evidence is always labeled separately from deterministic evidence.
-- Default `find` behavior (no `--semantic`) will not change.
+- `coverage.semantic_status` is `"not_requested"` (default) or `"active"` when `--semantic` was used and succeeded.
+- Evidence entries of type `"semantic_match"` appear in candidate evidence when semantic contributed. Detail format: `"cosine 0.NNN (BAAI/bge-small-en-v1.5)"`.
+- Semantic candidates are always labeled separately from deterministic evidence.
+- Deterministic (rg + BM25 + graph) evidence is always stronger than semantic evidence in the final ranking.
+- Default `find` behavior (no `--semantic`) is unchanged.
+- If the semantic index is missing or stale, `find --semantic` fails with a clear error and the next action: `agentgrep index --semantic`.
 
-Do not depend on semantic evidence being present. It is additive and opt-in only.
+### Storage
+
+- Model files: platform cache dir (Windows `%LOCALAPPDATA%\agentgrep\models\`; macOS/Linux `~/.cache/agentgrep/models/`). Global, not per-repo.
+- Semantic index: `.git/agentgrep/semantic/` (git repos) or `.agentgrep/semantic/` (non-git). Contains `meta.json` and `vectors.bin`.
+
+Do not depend on semantic evidence being present. It is additive and opt-in only. See `docs/SEMANTIC.md` for full documentation.
 

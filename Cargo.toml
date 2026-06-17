@@ -9,6 +9,7 @@ readme = "README.md"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
+fastembed = "4"
 globset = "0.4"
 ignore = "0.4"
 serde = { version = "1", features = ["derive"] }

@@ -70,12 +70,15 @@ pub enum Commands {
         /// Clear the stored index.
         #[arg(long, conflicts_with = "status", help = "Clear the stored index.")]
         clear: bool,
-        /// Prepare semantic embedding data in addition to the standard index (requires configured provider).
+        /// Prepare semantic embedding data in addition to the standard index.
         #[arg(
             long,
-            help = "Prepare semantic embedding data (requires configured provider)."
+            help = "Prepare semantic embedding data alongside the standard index."
         )]
         semantic: bool,
+        /// Automatically accept the embedding model download prompt (for scripts and CI).
+        #[arg(long, help = "Automatically accept download prompts.")]
+        yes: bool,
     },
     /// Inspect one file with indexed context.
     Map {
