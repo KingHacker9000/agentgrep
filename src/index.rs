@@ -19,8 +19,10 @@ use crate::text::shorten_snippet;
 use crate::types::{IndexedSymbol, SymbolKind, Visibility};
 use serde_json::Value;
 
-pub const INDEX_SCHEMA_VERSION: u32 = 5;
+pub const INDEX_SCHEMA_VERSION: u32 = 6;
 pub const HASH_LIMIT_BYTES: u64 = 1024 * 256;
+pub const MAX_LEX_TERMS: usize = 300;
+const LEX_READ_SIZE_LIMIT: u64 = HASH_LIMIT_BYTES;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoIndex {
@@ -37,13 +39,22 @@ pub struct RepoIndex {
     pub stats: IndexStats,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FileLexStats {
+    pub doc_length: u32,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub term_frequencies: BTreeMap<String, u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct IndexedFile {
     pub path: String,
     pub role: FileRole,
     pub size_bytes: Option<u64>,
     pub modified_unix: Option<u64>,
     pub content_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lex_stats: Option<FileLexStats>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,7 +108,7 @@ pub struct IndexedEdge {
     pub reason: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct IndexStats {
     pub file_count: usize,
     pub role_counts: BTreeMap<FileRole, usize>,
@@ -108,9 +119,13 @@ pub struct IndexStats {
     #[serde(default)]
     pub symbol_reference_count: usize,
     pub connection_count: usize,
+    #[serde(default)]
+    pub lex_file_count: usize,
+    #[serde(default)]
+    pub avg_doc_length: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum FileRole {
     Source,
@@ -119,6 +134,7 @@ pub enum FileRole {
     Config,
     Lockfile,
     Generated,
+    #[default]
     Other,
 }
 
@@ -166,6 +182,8 @@ pub struct IndexBuildReport {
     pub symbol_kind_counts: BTreeMap<SymbolKind, usize>,
     pub symbol_reference_count: usize,
     pub connection_count: usize,
+    pub lex_file_count: usize,
+    pub avg_doc_length: f64,
 }
 
 #[derive(Debug)]
@@ -180,6 +198,8 @@ pub struct IndexStatusReport {
     pub connection_count: usize,
     pub repo_rev: Option<String>,
     pub indexed_rev: Option<String>,
+    pub lex_file_count: usize,
+    pub avg_doc_length: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -237,6 +257,8 @@ pub fn build(repo: &RepoInfo) -> Result<IndexBuildReport> {
         symbol_kind_counts: index.stats.symbol_kind_counts.clone(),
         symbol_reference_count: index.stats.symbol_reference_count,
         connection_count: index.stats.connection_count,
+        lex_file_count: index.stats.lex_file_count,
+        avg_doc_length: index.stats.avg_doc_length,
     })
 }
 
@@ -255,6 +277,8 @@ pub fn status(repo: &RepoInfo) -> Result<IndexStatusReport> {
             connection_count: index.stats.connection_count,
             repo_rev: repo.rev.clone(),
             indexed_rev: index.repo_rev,
+            lex_file_count: index.stats.lex_file_count,
+            avg_doc_length: index.stats.avg_doc_length,
         })
     } else {
         Ok(IndexStatusReport {
@@ -268,6 +292,8 @@ pub fn status(repo: &RepoInfo) -> Result<IndexStatusReport> {
             connection_count: 0,
             repo_rev: repo.rev.clone(),
             indexed_rev: None,
+            lex_file_count: 0,
+            avg_doc_length: 0.0,
         })
     }
 }
@@ -326,6 +352,10 @@ pub fn write_build_report(report: &IndexBuildReport) -> Result<()> {
         report.symbol_reference_count
     );
     println!("- connections counted: {}", report.connection_count);
+    println!(
+        "- lexical stats: {} files, avg {:.0} tokens/file",
+        report.lex_file_count, report.avg_doc_length
+    );
     println!("- index path: {}", display_path(&report.index_path));
     println!(
         "- repo rev: {}",
@@ -352,6 +382,10 @@ pub fn write_status_report(report: &IndexStatusReport) -> Result<()> {
         report.symbol_reference_count
     );
     println!("- connections counted: {}", report.connection_count);
+    println!(
+        "- lexical stats: {} files, avg {:.0} tokens/file",
+        report.lex_file_count, report.avg_doc_length
+    );
     if let Some(repo_rev) = &report.repo_rev {
         println!("- repo rev: {}", repo_rev);
     }
@@ -464,10 +498,34 @@ pub fn likely_test_targets(
     scored
 }
 
+fn compute_file_lex_stats(text: &str) -> FileLexStats {
+    let tokens = crate::text::tokenize_lexical(text);
+    let doc_length = tokens.len() as u32;
+
+    let mut raw_freq: HashMap<String, u32> = HashMap::new();
+    for token in tokens {
+        *raw_freq.entry(token).or_insert(0) += 1;
+    }
+
+    let mut pairs: Vec<(String, u32)> = raw_freq.into_iter().collect();
+    pairs.sort_by(|(a_term, a_freq), (b_term, b_freq)| {
+        b_freq.cmp(a_freq).then_with(|| a_term.cmp(b_term))
+    });
+    pairs.truncate(MAX_LEX_TERMS);
+
+    let term_frequencies: BTreeMap<String, u32> = pairs.into_iter().collect();
+
+    FileLexStats {
+        doc_length,
+        term_frequencies,
+    }
+}
+
 fn build_index(repo: &RepoInfo) -> Result<RepoIndex> {
     let mut files = Vec::new();
     let mut source_texts = BTreeMap::new();
-    collect_files(&repo.root, &mut files, &mut source_texts)?;
+    let mut lex_texts = BTreeMap::new();
+    collect_files(&repo.root, &mut files, &mut source_texts, &mut lex_texts)?;
     files.sort_by(|left, right| left.path.cmp(&right.path));
 
     let source_paths: Vec<String> = files
@@ -497,6 +555,22 @@ fn build_index(repo: &RepoInfo) -> Result<RepoIndex> {
     dedup_edges(&mut edges);
     let connection_count = edges.len();
 
+    let mut lex_file_count = 0usize;
+    let mut total_doc_length = 0u64;
+    for file in &mut files {
+        if let Some(text) = lex_texts.get(&file.path) {
+            let stats = compute_file_lex_stats(text);
+            total_doc_length += stats.doc_length as u64;
+            lex_file_count += 1;
+            file.lex_stats = Some(stats);
+        }
+    }
+    let avg_doc_length = if lex_file_count > 0 {
+        total_doc_length as f64 / lex_file_count as f64
+    } else {
+        0.0
+    };
+
     let file_count = files.len();
     let role_counts = count_roles(&files);
     let symbol_count = symbols.len();
@@ -519,6 +593,8 @@ fn build_index(repo: &RepoInfo) -> Result<RepoIndex> {
             symbol_kind_counts,
             symbol_reference_count,
             connection_count,
+            lex_file_count,
+            avg_doc_length,
         },
     })
 }
@@ -2149,6 +2225,7 @@ fn collect_files(
     root: &Path,
     out: &mut Vec<IndexedFile>,
     source_texts: &mut BTreeMap<String, String>,
+    lex_texts: &mut BTreeMap<String, String>,
 ) -> Result<()> {
     let walker = WalkBuilder::new(root)
         .standard_filters(true)
@@ -2183,12 +2260,18 @@ fn collect_files(
             size_bytes,
             modified_unix,
             content_hash,
+            lex_stats: None,
         });
 
         if crate::parser::language::detect_language(&relative_path).is_some() {
             let contents = fs::read_to_string(path)
                 .with_context(|| format!("failed to read source file {}", display_path(path)))?;
-            source_texts.insert(relative_path, contents);
+            source_texts.insert(relative_path.clone(), contents.clone());
+            lex_texts.insert(relative_path, contents);
+        } else if metadata.len() <= LEX_READ_SIZE_LIMIT {
+            if let Ok(contents) = fs::read_to_string(path) {
+                lex_texts.insert(relative_path, contents);
+            }
         }
     }
 
@@ -2444,6 +2527,7 @@ mod tests {
             size_bytes: None,
             modified_unix: None,
             content_hash: None,
+            lex_stats: None,
         }
     }
 
@@ -2972,6 +3056,7 @@ mod tests {
                 symbol_kind_counts: BTreeMap::new(),
                 symbol_reference_count: 0,
                 connection_count: 0,
+                ..Default::default()
             },
         };
         assert_eq!(determine_state(&repo, Some(&index)), IndexState::Fresh);
@@ -3007,6 +3092,7 @@ mod tests {
                 size_bytes: Some(123),
                 modified_unix: Some(456),
                 content_hash: Some("deadbeef".to_string()),
+                lex_stats: None,
             }],
             symbols: vec![IndexedSymbol {
                 name: "main".to_string(),
@@ -3031,6 +3117,7 @@ mod tests {
                 symbol_kind_counts: BTreeMap::from([(SymbolKind::Function, 1)]),
                 symbol_reference_count: 0,
                 connection_count: 1,
+                ..Default::default()
             },
         };
         let json = serde_json::to_value(&index).unwrap();
@@ -3069,6 +3156,7 @@ mod tests {
                 symbol_kind_counts: BTreeMap::new(),
                 symbol_reference_count: 0,
                 connection_count: 0,
+                ..Default::default()
             },
         };
         let index_file = index_path(&repo);
@@ -3080,6 +3168,120 @@ mod tests {
         let clear = clear(&repo).unwrap();
         assert!(clear.cleared);
         assert!(!index_file.exists());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn compute_file_lex_stats_returns_expected_tokens() {
+        let stats = compute_file_lex_stats("pub struct SearchResult { name: String }");
+        assert!(stats.doc_length > 0, "doc_length should be non-zero");
+        assert!(
+            stats.term_frequencies.contains_key("search"),
+            "should contain 'search' from SearchResult"
+        );
+        assert!(
+            stats.term_frequencies.contains_key("result"),
+            "should contain 'result' from SearchResult"
+        );
+        assert!(
+            stats.term_frequencies.contains_key("name"),
+            "should contain 'name'"
+        );
+    }
+
+    #[test]
+    fn compute_file_lex_stats_skips_tiny_tokens() {
+        let stats = compute_file_lex_stats("fn is it a test");
+        assert!(!stats.term_frequencies.contains_key("fn"));
+        assert!(!stats.term_frequencies.contains_key("is"));
+        assert!(!stats.term_frequencies.contains_key("it"));
+        assert!(!stats.term_frequencies.contains_key("a"));
+        assert!(stats.term_frequencies.contains_key("test"));
+    }
+
+    #[test]
+    fn compute_file_lex_stats_skips_pure_numbers() {
+        let stats = compute_file_lex_stats("version 123 stable 456");
+        assert!(!stats.term_frequencies.contains_key("123"));
+        assert!(!stats.term_frequencies.contains_key("456"));
+        assert!(stats.term_frequencies.contains_key("version"));
+        assert!(stats.term_frequencies.contains_key("stable"));
+    }
+
+    #[test]
+    fn compute_file_lex_stats_caps_at_max_lex_terms() {
+        let text: String = (0..400).map(|i| format!("uniqueterm{i:04} ")).collect();
+        let stats = compute_file_lex_stats(&text);
+        assert!(
+            stats.term_frequencies.len() <= MAX_LEX_TERMS,
+            "term_frequencies should be capped at MAX_LEX_TERMS"
+        );
+    }
+
+    #[test]
+    fn compute_file_lex_stats_is_deterministic() {
+        let text = "SearchResult IndexedFile FileRole source config test ranking";
+        let stats1 = compute_file_lex_stats(text);
+        let stats2 = compute_file_lex_stats(text);
+        assert_eq!(
+            stats1.doc_length, stats2.doc_length,
+            "doc_length should be stable"
+        );
+        let keys1: Vec<_> = stats1.term_frequencies.keys().collect();
+        let keys2: Vec<_> = stats2.term_frequencies.keys().collect();
+        assert_eq!(keys1, keys2, "term_frequencies keys should be stable");
+    }
+
+    #[test]
+    fn build_index_populates_lex_stats_for_source_and_doc_files() {
+        let base = unique_temp_dir("lex-stats-build");
+        fs::create_dir_all(base.join(".git")).unwrap();
+        write_file(
+            &base,
+            "src/main.rs",
+            "pub fn main() { let result = SearchResult::new(); }\n",
+        );
+        write_file(&base, "README.md", "# Agentgrep\nFast local code radar.\n");
+
+        let repo = RepoInfo {
+            root: base.clone(),
+            rev: Some("abc".to_string()),
+            git_dir: Some(base.join(".git")),
+        };
+
+        let index = build_index(&repo).unwrap();
+
+        let src = index
+            .files
+            .iter()
+            .find(|f| f.path == "src/main.rs")
+            .expect("src/main.rs should be indexed");
+        assert!(src.lex_stats.is_some(), "source file should have lex_stats");
+        assert!(
+            src.lex_stats.as_ref().unwrap().doc_length > 0,
+            "source lex_stats doc_length should be non-zero"
+        );
+
+        let doc = index
+            .files
+            .iter()
+            .find(|f| f.path == "README.md")
+            .expect("README.md should be indexed");
+        assert!(doc.lex_stats.is_some(), "doc file should have lex_stats");
+        assert!(
+            doc.lex_stats.as_ref().unwrap().doc_length > 0,
+            "doc lex_stats doc_length should be non-zero"
+        );
+
+        assert!(
+            index.stats.lex_file_count >= 2,
+            "lex_file_count should cover at least both files"
+        );
+        assert!(
+            index.stats.avg_doc_length > 0.0,
+            "avg_doc_length should be positive"
+        );
+
         let _ = fs::remove_dir_all(base);
     }
 }

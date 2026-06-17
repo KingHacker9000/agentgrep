@@ -295,6 +295,7 @@ mod tests {
                 size_bytes: None,
                 modified_unix: None,
                 content_hash: None,
+                ..Default::default()
             })
             .collect::<Vec<_>>();
         RepoLookup::new(&files)

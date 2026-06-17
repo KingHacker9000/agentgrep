@@ -1302,6 +1302,7 @@ mod tests {
             size_bytes: Some(100),
             modified_unix: Some(1),
             content_hash: Some(format!("hash-{path}")),
+            ..Default::default()
         }
     }
 
@@ -1463,6 +1464,7 @@ mod tests {
                     symbol_kind_counts: std::collections::BTreeMap::new(),
                     symbol_reference_count: 6,
                     connection_count: 3,
+                    ..Default::default()
                 },
             }),
         }
@@ -1588,6 +1590,7 @@ mod tests {
                     symbol_kind_counts: std::collections::BTreeMap::new(),
                     symbol_reference_count: 3,
                     connection_count: 1,
+                    ..Default::default()
                 },
             }),
         };
@@ -1632,6 +1635,7 @@ mod tests {
                     symbol_kind_counts: std::collections::BTreeMap::new(),
                     symbol_reference_count: 0,
                     connection_count: 1,
+                    ..Default::default()
                 },
             }),
         };

@@ -396,6 +396,7 @@ mod tests {
                     size_bytes: Some(10),
                     modified_unix: Some(20),
                     content_hash: Some("deadbeef".to_string()),
+                    ..Default::default()
                 }],
                 symbols: vec![],
                 symbol_references: vec![],
@@ -413,6 +414,7 @@ mod tests {
                     symbol_kind_counts: BTreeMap::new(),
                     symbol_reference_count: 0,
                     connection_count: 1,
+                    ..Default::default()
                 },
             }),
         };
@@ -464,6 +466,7 @@ mod tests {
                     size_bytes: Some(10),
                     modified_unix: Some(20),
                     content_hash: Some("deadbeef".to_string()),
+                    ..Default::default()
                 }],
                 symbols: vec![],
                 symbol_references: vec![],
@@ -490,6 +493,7 @@ mod tests {
                     symbol_kind_counts: BTreeMap::new(),
                     symbol_reference_count: 0,
                     connection_count: 2,
+                    ..Default::default()
                 },
             }),
         };
@@ -522,6 +526,7 @@ mod tests {
                     size_bytes: Some(10),
                     modified_unix: Some(20),
                     content_hash: Some("deadbeef".to_string()),
+                    ..Default::default()
                 }],
                 symbols: vec![crate::types::IndexedSymbol {
                     name: "run".to_string(),
@@ -540,6 +545,7 @@ mod tests {
                     symbol_kind_counts: BTreeMap::from([(crate::types::SymbolKind::Function, 1)]),
                     symbol_reference_count: 0,
                     connection_count: 0,
+                    ..Default::default()
                 },
             }),
         };

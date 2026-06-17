@@ -1,10 +1,12 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use crate::index::{self, EdgeConfidence, IndexedEdge, IndexedSymbolReference, ReferenceContext};
-use crate::text::{normalize_phrase, shorten_snippet, squash_identifier, tokenize_terms};
+use crate::text::{
+    normalize_phrase, shorten_snippet, squash_identifier, tokenize_lexical, tokenize_terms,
+};
 use crate::types::{
     Confidence, Evidence, FileCandidate, IndexedSymbol, LineRange, SearchMatch, Snippet,
 };
@@ -81,6 +83,33 @@ pub fn rank_with_index(
     filters: &FindFilters,
 ) -> Vec<FileCandidate> {
     let profile = QueryProfile::new(query);
+
+    // Precompute document frequency (DF) per lex token across indexed files.
+    // DF = number of files where the term appears in the top-300 term_frequencies.
+    let lex_df: HashMap<String, usize> = index
+        .filter(|_| !profile.lex_tokens.is_empty())
+        .map(|idx| {
+            profile
+                .lex_tokens
+                .iter()
+                .map(|term| {
+                    let df = idx
+                        .files
+                        .iter()
+                        .filter(|f| {
+                            f.lex_stats
+                                .as_ref()
+                                .map(|ls| ls.term_frequencies.contains_key(term.as_str()))
+                                .unwrap_or(false)
+                        })
+                        .count()
+                        .max(1);
+                    (term.clone(), df)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     let mut grouped: BTreeMap<String, Vec<SearchMatch>> = BTreeMap::new();
 
     for item in matches {
@@ -91,7 +120,7 @@ pub fn rank_with_index(
         .into_iter()
         .map(|(path, mut matches)| {
             matches.sort_by_key(|item| item.line_number);
-            build_candidate(path, matches, &profile, index, index_status)
+            build_candidate(path, matches, &profile, index, index_status, &lex_df)
         })
         .filter(|ranked| filters.allows(&ranked.candidate.path, &ranked.candidate.role))
         .filter(|ranked| match filters.match_mode {
@@ -137,7 +166,11 @@ struct QueryProfile {
     normalized_phrase: String,
     squashed_phrase: String,
     terms: Vec<String>,
+    lex_tokens: Vec<String>,
     identifier_like: bool,
+    /// Non-empty when the raw query is a single identifier (no spaces) that split
+    /// into 2+ tokens — used to emit transparent "identifier expansion" evidence.
+    expansion_tokens: Vec<String>,
 }
 
 impl QueryProfile {
@@ -148,13 +181,21 @@ impl QueryProfile {
         let mut terms = tokenize_terms(&raw);
         terms.sort();
         terms.dedup();
+        let lex_tokens = tokenize_lexical(&raw);
         let identifier_like = is_identifier_like(&raw, &terms);
+        let expansion_tokens = if identifier_like && !raw.contains(' ') && terms.len() >= 2 {
+            terms.clone()
+        } else {
+            vec![]
+        };
 
         Self {
             normalized_phrase,
             squashed_phrase,
             terms,
+            lex_tokens,
             identifier_like,
+            expansion_tokens,
         }
     }
 }
@@ -165,6 +206,7 @@ fn build_candidate(
     profile: &QueryProfile,
     index: Option<&index::RepoIndex>,
     index_status: &str,
+    lex_df: &HashMap<String, usize>,
 ) -> RankedCandidate {
     let normalized_path = path.replace('\\', "/");
     let lower_path = normalized_path.to_lowercase();
@@ -178,7 +220,6 @@ fn build_candidate(
 
     let role = classify_role(&lower_path, &file_name_tokens);
     let clusters = cluster_matches(&matches);
-    let file_has_test_signals = file_has_test_signals(&matches);
     let best_exact_cluster = select_exact_phrase_cluster(&clusters, profile);
     let best_near_cluster = if best_exact_cluster.is_none() {
         select_near_phrase_cluster(&clusters, profile)
@@ -208,7 +249,12 @@ fn build_candidate(
     }
 
     if let Some(cluster) = best_exact_cluster {
-        let fixture_like = cluster.is_fixture_like() || file_has_test_signals;
+        // Use only the cluster's own content to decide fixture status — not the whole
+        // file. file_has_test_signals was too broad: it penalised definition files that
+        // also happen to contain a test module, causing the actual `pub struct Foo {`
+        // cluster to be treated as a fixture even though it contains no assert/mock/test
+        // keywords. cluster.is_fixture_like() checks the matched lines themselves.
+        let fixture_like = cluster.is_fixture_like();
         let phrase_boost = exact_phrase_boost(&role, profile, fixture_like);
         score += phrase_boost;
         evidence.push(Evidence {
@@ -238,6 +284,27 @@ fn build_candidate(
         });
     }
 
+    // Identifier expansion evidence: when the query was a single identifier
+    // (camelCase/snake_case) and its split tokens matched the filename or path,
+    // emit a transparent "Why:" line so the user sees why this file ranked.
+    if !profile.expansion_tokens.is_empty() {
+        let matched: Vec<&str> = profile
+            .expansion_tokens
+            .iter()
+            .filter(|et| {
+                file_name_tokens.iter().any(|ft| token_matches_term(et, ft))
+                    || path_tokens.iter().any(|pt| token_matches_term(et, pt))
+            })
+            .map(String::as_str)
+            .collect();
+        if matched.len() >= 2 {
+            evidence.push(Evidence {
+                evidence_type: "identifier_expansion".to_string(),
+                detail: format!("identifier expansion matched {}", matched.join(" + ")),
+            });
+        }
+    }
+
     apply_role_weight(&role, &mut score, &mut evidence);
 
     let mut index_tier = path_shape_tier;
@@ -251,6 +318,15 @@ fn build_candidate(
             &mut score,
             &mut evidence,
         ));
+        apply_lex_score(
+            &normalized_path,
+            &profile.lex_tokens,
+            lex_df,
+            index,
+            index_status,
+            &mut score,
+            &mut evidence,
+        );
     }
 
     let snippets = build_snippets(&clusters, profile);
@@ -624,7 +700,7 @@ fn apply_index_evidence(
         .iter()
         .filter(|edge| edge.from == path || edge.to == path)
     {
-        if let Some(signal) = edge_signal(edge, path, scale) {
+        if let Some(signal) = edge_signal(edge, path, scale, profile, index) {
             let key = format!("edge:{}:{}:{}", edge.edge_type, edge.from, edge.to);
             if seen.insert(key) {
                 boosts.push(signal);
@@ -661,6 +737,97 @@ fn apply_index_evidence(
     }
 
     index_tier
+}
+
+fn apply_lex_score(
+    path: &str,
+    lex_tokens: &[String],
+    lex_df: &HashMap<String, usize>,
+    index: &index::RepoIndex,
+    index_status: &str,
+    score: &mut f64,
+    evidence: &mut Vec<Evidence>,
+) {
+    let scale = index_boost_scale(index_status);
+    if scale <= 0.0 || lex_tokens.is_empty() {
+        return;
+    }
+
+    let avg_doc_len = index.stats.avg_doc_length;
+    let n = index.stats.lex_file_count;
+    if avg_doc_len <= 0.0 || n == 0 {
+        return;
+    }
+
+    let Some(file) = index.files.iter().find(|f| f.path == path) else {
+        return;
+    };
+    let Some(lex_stats) = file.lex_stats.as_ref() else {
+        return;
+    };
+    if lex_stats.doc_length == 0 {
+        return;
+    }
+
+    let k1 = 1.5_f64;
+    let b = 0.75_f64;
+    let dl = lex_stats.doc_length as f64;
+    let n_f = n as f64;
+
+    let mut raw_score = 0.0_f64;
+    let mut matched: Vec<&str> = Vec::new();
+
+    for term in lex_tokens {
+        let tf = match lex_stats.term_frequencies.get(term.as_str()) {
+            Some(&tf) if tf > 0 => tf as f64,
+            _ => continue,
+        };
+
+        let df = *lex_df.get(term).unwrap_or(&1) as f64;
+        let idf = ((n_f - df + 0.5) / (df + 0.5) + 1.0).ln().max(0.0);
+        let tf_norm = tf * (k1 + 1.0) / (tf + k1 * (1.0 - b + b * dl / avg_doc_len));
+
+        raw_score += idf * tf_norm;
+        matched.push(term);
+    }
+
+    if raw_score <= 0.0 || matched.is_empty() {
+        return;
+    }
+
+    // Normalize to [0..1]: max per term is (k1+1) * ln(n+1), scaled to 0.20 max contribution.
+    // This keeps lex evidence below exact-phrase (0.34) and symbol-definition (0.78) signals.
+    let max_per_term = (k1 + 1.0) * (n_f + 1.0).ln().max(1.0);
+    let max_possible = lex_tokens.len() as f64 * max_per_term;
+    let normalized = (raw_score / max_possible.max(1.0)).min(1.0);
+    let contribution = (normalized * 0.20 * scale).max(0.0);
+
+    if contribution < 0.01 {
+        return;
+    }
+
+    *score += contribution;
+
+    if contribution >= 0.04 {
+        // Insert right after the last indexed signal so this evidence is visible
+        // in the "Why:" line (which shows the first 4 items).
+        let insert_pos = evidence
+            .iter()
+            .rposition(|e| {
+                e.evidence_type == "indexed_symbol_definition"
+                    || e.evidence_type == "indexed_symbol_reference"
+                    || e.evidence_type == "indexed_edge"
+            })
+            .map(|p| p + 1)
+            .unwrap_or(0);
+        evidence.insert(
+            insert_pos,
+            Evidence {
+                evidence_type: "lexical_score".to_string(),
+                detail: format!("lexical score matched terms: {}", matched.join(", ")),
+            },
+        );
+    }
 }
 
 fn index_boost_scale(index_status: &str) -> f64 {
@@ -765,7 +932,13 @@ fn symbol_reference_signal(reference: &IndexedSymbolReference, scale: f64) -> Op
     })
 }
 
-fn edge_signal(edge: &IndexedEdge, path: &str, scale: f64) -> Option<IndexSignal> {
+fn edge_signal(
+    edge: &IndexedEdge,
+    path: &str,
+    scale: f64,
+    profile: &QueryProfile,
+    index: &index::RepoIndex,
+) -> Option<IndexSignal> {
     let (base, tier) = match edge.edge_type.as_str() {
         "imports" | "references" | "declares_module" => (0.05, 1),
         "same_area" => (0.005, 0),
@@ -776,10 +949,37 @@ fn edge_signal(edge: &IndexedEdge, path: &str, scale: f64) -> Option<IndexSignal
     } else {
         0.0
     };
-    let score = (base + directional_bonus) * scale;
+    // Query-aware multiplier: if the other endpoint's path/symbols match the query,
+    // give a stronger boost so relevant graph connections surface. same_area stays
+    // flat — it's structural co-location, not a meaningful dependency signal.
+    let relevance = if edge.edge_type != "same_area" {
+        let other_path = if edge.from == path {
+            &edge.to
+        } else {
+            &edge.from
+        };
+        compute_query_edge_relevance(other_path, profile, index)
+    } else {
+        1.0
+    };
+    let score = (base + directional_bonus) * scale * relevance;
     if score <= 0.0 {
         return None;
     }
+
+    let detail = if relevance > 1.0 {
+        let other_path = if edge.from == path {
+            &edge.to
+        } else {
+            &edge.from
+        };
+        format!(
+            "connected to query-relevant {} via {}",
+            other_path, edge.edge_type
+        )
+    } else {
+        format!("indexed edge {} {}", edge.edge_type, edge.reason)
+    };
 
     Some(IndexSignal {
         score,
@@ -791,9 +991,42 @@ fn edge_signal(edge: &IndexedEdge, path: &str, scale: f64) -> Option<IndexSignal
         tier,
         evidence: Evidence {
             evidence_type: "indexed_edge".to_string(),
-            detail: format!("indexed edge {} {}", edge.edge_type, edge.reason),
+            detail,
         },
     })
+}
+
+/// Returns a score multiplier (≥1.0) for an edge whose other endpoint's
+/// path or symbols are relevant to the query.  Kept modest so edges never
+/// swamp direct text/symbol evidence.
+fn compute_query_edge_relevance(
+    other_path: &str,
+    profile: &QueryProfile,
+    index: &index::RepoIndex,
+) -> f64 {
+    if profile.terms.is_empty() {
+        return 1.0;
+    }
+    let other_tokens = tokenize_terms(other_path);
+    let term_hits = profile
+        .terms
+        .iter()
+        .filter(|t| other_tokens.iter().any(|ot| token_matches_term(t, ot)))
+        .count();
+    if term_hits == 0 {
+        return 1.0;
+    }
+    let has_symbol = index
+        .symbols
+        .iter()
+        .any(|s| s.file_path == other_path && symbol_match_strength(&s.name, profile).is_some());
+    if has_symbol {
+        1.5
+    } else if term_hits >= profile.terms.len() {
+        1.3
+    } else {
+        1.1
+    }
 }
 
 fn reference_matches_profile(reference: &IndexedSymbolReference, profile: &QueryProfile) -> bool {
@@ -1249,18 +1482,6 @@ fn is_fixture_like_text(text: &str) -> bool {
         || text.contains("test")
 }
 
-fn file_has_test_signals(matches: &[SearchMatch]) -> bool {
-    matches.iter().any(|item| {
-        let text = item.snippet.to_lowercase();
-        text.contains("#[test]")
-            || text.contains("mod tests")
-            || text.contains("assert_eq!")
-            || text.contains("assert!")
-            || text.contains("match_item(")
-            || text.contains("test ")
-    })
-}
-
 fn classify_role(path: &str, file_name_tokens: &[String]) -> FileRole {
     if is_generated_path(path) {
         return FileRole::Generated;
@@ -1429,8 +1650,8 @@ fn round_score(score: f64) -> f64 {
 mod tests {
     use super::*;
     use crate::index::{
-        EdgeConfidence, FileRole as IndexFileRole, IndexStats, IndexedEdge, IndexedFile,
-        IndexedSymbolReference, ReferenceContext, RepoIndex,
+        EdgeConfidence, FileLexStats, FileRole as IndexFileRole, IndexStats, IndexedEdge,
+        IndexedFile, IndexedSymbolReference, ReferenceContext, RepoIndex,
     };
     use std::collections::BTreeMap;
 
@@ -1460,6 +1681,7 @@ mod tests {
             size_bytes: None,
             modified_unix: None,
             content_hash: None,
+            lex_stats: None,
         }
     }
 
@@ -1485,6 +1707,7 @@ mod tests {
                 symbol_kind_counts: BTreeMap::new(),
                 symbol_reference_count: 0,
                 connection_count: 0,
+                ..Default::default()
             },
         }
     }
@@ -2146,5 +2369,492 @@ mod tests {
         );
 
         assert_eq!(candidates.first().unwrap().path, "src/routes/handler.ts");
+    }
+
+    fn make_lex_index(files: Vec<IndexedFile>, avg_doc_length: f64) -> RepoIndex {
+        let lex_file_count = files.iter().filter(|f| f.lex_stats.is_some()).count();
+        RepoIndex {
+            schema_version: crate::index::INDEX_SCHEMA_VERSION,
+            repo_root: "C:/repo".to_string(),
+            repo_rev: Some("abc".to_string()),
+            indexed_at_unix: 1,
+            files,
+            symbols: vec![],
+            symbol_references: vec![],
+            edges: vec![],
+            stats: IndexStats {
+                file_count: 2,
+                role_counts: BTreeMap::from([(IndexFileRole::Source, 2)]),
+                symbol_count: 0,
+                symbol_kind_counts: BTreeMap::new(),
+                symbol_reference_count: 0,
+                connection_count: 0,
+                lex_file_count,
+                avg_doc_length,
+            },
+        }
+    }
+
+    #[test]
+    fn lexical_score_boosts_file_with_repeated_query_terms() {
+        let matches = vec![
+            match_item("src/downloader.rs", 10, "fn download_progress() {}"),
+            match_item("src/utils.rs", 5, "// some download and progress utility"),
+        ];
+
+        // 10 files total — only downloader.rs and utils.rs contain "download"/"progress".
+        // This gives meaningful IDF and a contribution well above the evidence threshold.
+        let mut bg_files: Vec<IndexedFile> = (0..8)
+            .map(|i| IndexedFile {
+                path: format!("src/module{i}.rs"),
+                role: IndexFileRole::Source,
+                size_bytes: None,
+                modified_unix: None,
+                content_hash: None,
+                lex_stats: Some(FileLexStats {
+                    doc_length: 500,
+                    term_frequencies: BTreeMap::from([("result".to_string(), 10u32)]),
+                }),
+            })
+            .collect();
+
+        let mut files = vec![
+            IndexedFile {
+                path: "src/downloader.rs".to_string(),
+                role: IndexFileRole::Source,
+                size_bytes: None,
+                modified_unix: None,
+                content_hash: None,
+                lex_stats: Some(FileLexStats {
+                    doc_length: 500,
+                    term_frequencies: BTreeMap::from([
+                        ("download".to_string(), 28u32),
+                        ("progress".to_string(), 18u32),
+                    ]),
+                }),
+            },
+            IndexedFile {
+                path: "src/utils.rs".to_string(),
+                role: IndexFileRole::Source,
+                size_bytes: None,
+                modified_unix: None,
+                content_hash: None,
+                lex_stats: Some(FileLexStats {
+                    doc_length: 500,
+                    term_frequencies: BTreeMap::from([
+                        ("download".to_string(), 1u32),
+                        ("progress".to_string(), 1u32),
+                    ]),
+                }),
+            },
+        ];
+        files.append(&mut bg_files);
+
+        let index = make_lex_index(files, 500.0);
+
+        let candidates = rank_with_index(
+            "download progress",
+            matches,
+            Some(&index),
+            "fresh",
+            &FindFilters::default(),
+        );
+
+        assert_eq!(candidates.first().unwrap().path, "src/downloader.rs");
+        assert!(candidates
+            .first()
+            .unwrap()
+            .evidence
+            .iter()
+            .any(|e| e.evidence_type == "lexical_score"));
+        let lex_ev = candidates
+            .first()
+            .unwrap()
+            .evidence
+            .iter()
+            .find(|e| e.evidence_type == "lexical_score")
+            .unwrap();
+        assert!(
+            lex_ev.detail.contains("download") || lex_ev.detail.contains("progress"),
+            "evidence detail should name the matched terms"
+        );
+    }
+
+    #[test]
+    fn exact_symbol_definition_beats_lexical_noise() {
+        // The symbol-definition file has weak lex stats, but the definition signal wins.
+        let matches = vec![
+            match_item("src/download.rs", 11, "pub struct DownloadProgress {"),
+            match_item(
+                "src/tracker.rs",
+                22,
+                "fn update_download_progress(item: &DownloadProgress) {}",
+            ),
+        ];
+
+        let index = RepoIndex {
+            schema_version: crate::index::INDEX_SCHEMA_VERSION,
+            repo_root: "C:/repo".to_string(),
+            repo_rev: Some("abc".to_string()),
+            indexed_at_unix: 1,
+            files: vec![
+                IndexedFile {
+                    path: "src/download.rs".to_string(),
+                    role: IndexFileRole::Source,
+                    size_bytes: None,
+                    modified_unix: None,
+                    content_hash: None,
+                    lex_stats: Some(FileLexStats {
+                        doc_length: 300,
+                        term_frequencies: BTreeMap::from([
+                            ("download".to_string(), 5u32),
+                            ("progress".to_string(), 3u32),
+                        ]),
+                    }),
+                },
+                IndexedFile {
+                    path: "src/tracker.rs".to_string(),
+                    role: IndexFileRole::Source,
+                    size_bytes: None,
+                    modified_unix: None,
+                    content_hash: None,
+                    lex_stats: Some(FileLexStats {
+                        doc_length: 300,
+                        term_frequencies: BTreeMap::from([
+                            ("download".to_string(), 30u32),
+                            ("progress".to_string(), 25u32),
+                        ]),
+                    }),
+                },
+            ],
+            symbols: vec![crate::types::IndexedSymbol {
+                name: "DownloadProgress".to_string(),
+                kind: crate::types::SymbolKind::Struct,
+                file_path: "src/download.rs".to_string(),
+                line_number: 11,
+                visibility: crate::types::Visibility::Public,
+                signature: Some("pub struct DownloadProgress {".to_string()),
+            }],
+            symbol_references: vec![],
+            edges: vec![],
+            stats: IndexStats {
+                file_count: 2,
+                role_counts: BTreeMap::from([(IndexFileRole::Source, 2)]),
+                symbol_count: 1,
+                symbol_kind_counts: BTreeMap::new(),
+                symbol_reference_count: 0,
+                connection_count: 0,
+                lex_file_count: 2,
+                avg_doc_length: 300.0,
+            },
+        };
+
+        let candidates = rank_with_index(
+            "DownloadProgress",
+            matches,
+            Some(&index),
+            "fresh",
+            &FindFilters::default(),
+        );
+
+        assert_eq!(candidates.first().unwrap().path, "src/download.rs");
+        assert!(candidates
+            .first()
+            .unwrap()
+            .evidence
+            .iter()
+            .any(|e| e.evidence_type == "indexed_symbol_definition"));
+    }
+
+    #[test]
+    fn lexical_score_absent_when_index_missing() {
+        let matches = vec![match_item("src/downloader.rs", 10, "download progress")];
+
+        let candidates = rank_with_index(
+            "download progress",
+            matches,
+            None,
+            "not_applicable",
+            &FindFilters::default(),
+        );
+
+        assert!(!candidates
+            .first()
+            .unwrap()
+            .evidence
+            .iter()
+            .any(|e| e.evidence_type == "lexical_score"));
+    }
+
+    #[test]
+    fn identifier_expansion_emits_evidence_for_camel_case_query() {
+        // Query "downloadProgress" splits into [download, progress].
+        // The file named download_progress.rs should match via expansion and
+        // emit identifier_expansion evidence.
+        let matches = vec![
+            match_item("src/download_progress.rs", 5, "fn track() {}"),
+            match_item("src/utils.rs", 10, "// downloadProgress helper"),
+        ];
+
+        let candidates = rank_with_index(
+            "downloadProgress",
+            matches,
+            None,
+            "not_applicable",
+            &FindFilters::default(),
+        );
+
+        let top = candidates.first().unwrap();
+        assert_eq!(top.path, "src/download_progress.rs");
+        assert!(
+            top.evidence
+                .iter()
+                .any(|e| e.evidence_type == "identifier_expansion"),
+            "expected identifier_expansion evidence for camelCase query"
+        );
+        let ev = top
+            .evidence
+            .iter()
+            .find(|e| e.evidence_type == "identifier_expansion")
+            .unwrap();
+        assert!(
+            ev.detail.contains("download") && ev.detail.contains("progress"),
+            "expansion evidence should name the matched tokens"
+        );
+    }
+
+    #[test]
+    fn graph_boost_helps_files_connected_to_query_relevant_target() {
+        // src/main.rs imports src/download_manager.rs (which has symbols matching
+        // the query). src/main.rs should get a graph boost and rank above src/other.rs
+        // which has a same-relevance rg match but no edge to a query-relevant file.
+        let matches = vec![
+            match_item("src/main.rs", 5, "use download_manager;"),
+            match_item("src/other.rs", 12, "use download_manager;"),
+        ];
+
+        let index = RepoIndex {
+            schema_version: crate::index::INDEX_SCHEMA_VERSION,
+            repo_root: "C:/repo".to_string(),
+            repo_rev: Some("abc".to_string()),
+            indexed_at_unix: 1,
+            files: vec![
+                indexed_file("src/main.rs", IndexFileRole::Source),
+                indexed_file("src/other.rs", IndexFileRole::Source),
+                indexed_file("src/download_manager.rs", IndexFileRole::Source),
+            ],
+            symbols: vec![indexed_symbol(
+                "DownloadManager",
+                "src/download_manager.rs",
+                1,
+            )],
+            symbol_references: vec![],
+            edges: vec![
+                IndexedEdge {
+                    edge_type: "imports".to_string(),
+                    from: "src/main.rs".to_string(),
+                    to: "src/download_manager.rs".to_string(),
+                    confidence: EdgeConfidence::Extracted,
+                    reason: "imports download_manager".to_string(),
+                },
+                IndexedEdge {
+                    edge_type: "same_area".to_string(),
+                    from: "src/other.rs".to_string(),
+                    to: "src/download_manager.rs".to_string(),
+                    confidence: EdgeConfidence::Extracted,
+                    reason: "shared source area src".to_string(),
+                },
+            ],
+            stats: IndexStats {
+                file_count: 3,
+                role_counts: BTreeMap::from([(IndexFileRole::Source, 3)]),
+                symbol_count: 1,
+                symbol_kind_counts: BTreeMap::new(),
+                symbol_reference_count: 0,
+                connection_count: 1,
+                ..Default::default()
+            },
+        };
+
+        let candidates = rank_with_index(
+            "DownloadManager",
+            matches,
+            Some(&index),
+            "fresh",
+            &FindFilters::default(),
+        );
+
+        let main_score = candidates
+            .iter()
+            .find(|c| c.path == "src/main.rs")
+            .map(|c| c.score)
+            .unwrap_or(0.0);
+        let other_score = candidates
+            .iter()
+            .find(|c| c.path == "src/other.rs")
+            .map(|c| c.score)
+            .unwrap_or(0.0);
+
+        assert!(
+            main_score > other_score,
+            "imports edge to query-relevant file should beat same_area edge (main={main_score} other={other_score})"
+        );
+        // Graph evidence should be present for main.rs
+        let main = candidates.iter().find(|c| c.path == "src/main.rs").unwrap();
+        assert!(
+            main.evidence
+                .iter()
+                .any(|e| e.evidence_type == "indexed_edge"),
+            "main.rs should have indexed_edge evidence from the graph boost"
+        );
+    }
+
+    #[test]
+    fn same_area_edge_stays_weak_regardless_of_query_relevance() {
+        // A same_area edge to a perfectly query-relevant file should not produce
+        // a strong boost — same_area is structural co-location, not a real dependency.
+        let matches = vec![
+            match_item("src/consumer.rs", 10, "use progress;"),
+            match_item("src/other.rs", 5, "use progress;"),
+        ];
+
+        let index = RepoIndex {
+            schema_version: crate::index::INDEX_SCHEMA_VERSION,
+            repo_root: "C:/repo".to_string(),
+            repo_rev: Some("abc".to_string()),
+            indexed_at_unix: 1,
+            files: vec![
+                indexed_file("src/consumer.rs", IndexFileRole::Source),
+                indexed_file("src/other.rs", IndexFileRole::Source),
+                indexed_file("src/progress.rs", IndexFileRole::Source),
+            ],
+            symbols: vec![indexed_symbol("Progress", "src/progress.rs", 1)],
+            symbol_references: vec![],
+            edges: vec![
+                // consumer.rs imports progress.rs (strong edge to query-relevant target)
+                IndexedEdge {
+                    edge_type: "imports".to_string(),
+                    from: "src/consumer.rs".to_string(),
+                    to: "src/progress.rs".to_string(),
+                    confidence: EdgeConfidence::Extracted,
+                    reason: "imports progress".to_string(),
+                },
+                // other.rs has same_area with progress.rs (weak co-location only)
+                IndexedEdge {
+                    edge_type: "same_area".to_string(),
+                    from: "src/other.rs".to_string(),
+                    to: "src/progress.rs".to_string(),
+                    confidence: EdgeConfidence::Extracted,
+                    reason: "shared source area src".to_string(),
+                },
+            ],
+            stats: IndexStats {
+                file_count: 3,
+                role_counts: BTreeMap::from([(IndexFileRole::Source, 3)]),
+                symbol_count: 1,
+                symbol_kind_counts: BTreeMap::new(),
+                symbol_reference_count: 0,
+                connection_count: 1,
+                ..Default::default()
+            },
+        };
+
+        let candidates = rank_with_index(
+            "Progress",
+            matches,
+            Some(&index),
+            "fresh",
+            &FindFilters::default(),
+        );
+
+        let consumer_score = candidates
+            .iter()
+            .find(|c| c.path == "src/consumer.rs")
+            .map(|c| c.score)
+            .unwrap_or(0.0);
+        let other_score = candidates
+            .iter()
+            .find(|c| c.path == "src/other.rs")
+            .map(|c| c.score)
+            .unwrap_or(0.0);
+
+        assert!(
+            consumer_score > other_score,
+            "imports edge should outrank same_area edge even when both point to a query-relevant file \
+             (consumer={consumer_score}, other={other_score})"
+        );
+    }
+
+    #[test]
+    fn definition_file_with_embedded_tests_beats_fixture_reference() {
+        // Regression test for the agentgrep dogfood bug:
+        // `agentgrep find "SearchResult"` was ranking types.rs #1 and the actual
+        // definition file (search.rs) #4.
+        //
+        // Root cause: file_has_test_signals() was checking ALL rg matches in the file.
+        // search.rs defines `pub struct SearchResult` AND has a test module with #[test]
+        // annotations. The test-module match triggered the fixture penalty, capping
+        // search.rs's score at 0.30 + tier_boost = 1.05, while types.rs (no test signals)
+        // scored ~1.30 cleanly.
+        //
+        // Fix: fixture_like now comes only from cluster.is_fixture_like() — the matched
+        // CONTENT, not the file as a whole. The definition cluster at line 11 does not
+        // contain assert/mock/test keywords, so it is not penalised.
+        let matches = vec![
+            // The real definition — this is the cluster that matters:
+            match_item("src/search.rs", 11, "pub struct SearchResult {"),
+            // A match from the test module inside the same file:
+            match_item("src/search.rs", 850, "#[test] fn it_returns_results() {}"),
+            // Another file with the symbol only as a fixture string:
+            match_item(
+                "src/blast.rs",
+                200,
+                "build_report(&repo(), &index(), \"SearchResult\")",
+            ),
+        ];
+
+        let index = repo_index(
+            vec![indexed_symbol("SearchResult", "src/search.rs", 11)],
+            vec![],
+            vec![],
+            vec![
+                indexed_file("src/search.rs", IndexFileRole::Source),
+                indexed_file("src/blast.rs", IndexFileRole::Source),
+            ],
+        );
+
+        let candidates = rank_with_index(
+            "SearchResult",
+            matches,
+            Some(&index),
+            "fresh",
+            &FindFilters::default(),
+        );
+
+        assert_eq!(candidates.first().unwrap().path, "src/search.rs");
+        assert!(
+            candidates
+                .first()
+                .unwrap()
+                .evidence
+                .iter()
+                .any(|e| e.evidence_type == "indexed_symbol_definition"),
+            "definition file must show indexed_symbol_definition in evidence"
+        );
+        // Sanity: the blast.rs fixture reference must rank below the definition.
+        let search_score = candidates
+            .iter()
+            .find(|c| c.path == "src/search.rs")
+            .map(|c| c.score)
+            .unwrap_or(0.0);
+        let blast_score = candidates
+            .iter()
+            .find(|c| c.path == "src/blast.rs")
+            .map(|c| c.score)
+            .unwrap_or(0.0);
+        assert!(
+            search_score > blast_score,
+            "definition (search.rs={search_score}) must outscore fixture reference (blast.rs={blast_score})"
+        );
     }
 }

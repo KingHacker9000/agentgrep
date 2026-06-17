@@ -448,6 +448,7 @@ fn build_file_context(
             size_bytes: None,
             modified_unix: None,
             content_hash: None,
+            lex_stats: None,
         });
 
     let outgoing_all: Vec<&IndexedEdge> = index
@@ -561,6 +562,7 @@ mod tests {
                 size_bytes: Some(100),
                 modified_unix: Some(1),
                 content_hash: Some("aa".to_string()),
+                ..Default::default()
             },
             IndexedFile {
                 path: "src/search.rs".to_string(),
@@ -568,6 +570,7 @@ mod tests {
                 size_bytes: Some(100),
                 modified_unix: Some(1),
                 content_hash: Some("bb".to_string()),
+                ..Default::default()
             },
         ];
         let edges = vec![
@@ -606,6 +609,7 @@ mod tests {
                     symbol_kind_counts: std::collections::BTreeMap::new(),
                     symbol_reference_count: 0,
                     connection_count: 2,
+                    ..Default::default()
                 },
             }),
         }
@@ -697,6 +701,7 @@ mod tests {
                         size_bytes: Some(100),
                         modified_unix: Some(1),
                         content_hash: Some("aa".to_string()),
+                        ..Default::default()
                     },
                     IndexedFile {
                         path: "src/search.rs".to_string(),
@@ -704,6 +709,7 @@ mod tests {
                         size_bytes: Some(100),
                         modified_unix: Some(1),
                         content_hash: Some("bb".to_string()),
+                        ..Default::default()
                     },
                 ],
                 symbols: vec![symbol("SearchResult", "src/types.rs", 12)],
@@ -726,6 +732,7 @@ mod tests {
                     symbol_kind_counts: std::collections::BTreeMap::new(),
                     symbol_reference_count: 1,
                     connection_count: 0,
+                    ..Default::default()
                 },
             }),
         };
@@ -754,6 +761,7 @@ mod tests {
                 size_bytes: Some(100),
                 modified_unix: Some(1),
                 content_hash: Some("aa".to_string()),
+                ..Default::default()
             }],
             symbols: vec![],
             symbol_references: vec![
@@ -799,6 +807,7 @@ mod tests {
                 symbol_kind_counts: BTreeMap::new(),
                 symbol_reference_count: 3,
                 connection_count: 0,
+                ..Default::default()
             },
         };
         let symbol = IndexedSymbol {
@@ -836,6 +845,7 @@ mod tests {
                 size_bytes: Some(100),
                 modified_unix: Some(1),
                 content_hash: Some("aa".to_string()),
+                ..Default::default()
             }],
             symbols: vec![IndexedSymbol {
                 name: "LLMClient".to_string(),
@@ -864,6 +874,7 @@ mod tests {
                 symbol_kind_counts: BTreeMap::new(),
                 symbol_reference_count: 1,
                 connection_count: 0,
+                ..Default::default()
             },
         };
         let symbol = IndexedSymbol {

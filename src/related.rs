@@ -1078,6 +1078,7 @@ mod tests {
                         size_bytes: Some(100),
                         modified_unix: Some(1),
                         content_hash: Some("aa".to_string()),
+                        ..Default::default()
                     },
                     IndexedFile {
                         path: "src/types.rs".to_string(),
@@ -1085,6 +1086,7 @@ mod tests {
                         size_bytes: Some(100),
                         modified_unix: Some(1),
                         content_hash: Some("bb".to_string()),
+                        ..Default::default()
                     },
                     IndexedFile {
                         path: "src/symbol.rs".to_string(),
@@ -1092,6 +1094,7 @@ mod tests {
                         size_bytes: Some(100),
                         modified_unix: Some(1),
                         content_hash: Some("cc".to_string()),
+                        ..Default::default()
                     },
                     IndexedFile {
                         path: "src/main.rs".to_string(),
@@ -1099,6 +1102,7 @@ mod tests {
                         size_bytes: Some(100),
                         modified_unix: Some(1),
                         content_hash: Some("dd".to_string()),
+                        ..Default::default()
                     },
                 ],
                 symbols: vec![
@@ -1222,6 +1226,7 @@ mod tests {
                     symbol_kind_counts: std::collections::BTreeMap::new(),
                     symbol_reference_count: 5,
                     connection_count: 3,
+                    ..Default::default()
                 },
             }),
         }
