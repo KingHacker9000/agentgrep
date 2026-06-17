@@ -381,26 +381,33 @@ Exit criteria:
 
 ## Milestone 8 — Optional hybrid semantic mode behind a flag
 
-Status: planned, later.
+Status: in progress — CLI flags added; provider not yet configured.
 
-Goal:
+Completed so far:
 
-Offer deeper search on larger codebases without changing the default lightweight path.
+- `agentgrep find --semantic` and `agentgrep index --semantic` flags added.
+- Passing `--semantic` with no provider configured returns a clear actionable error.
+- `coverage.semantic_status` field added to `find --json` output (value: `"not_requested"` until a provider is active).
+- `src/semantic.rs` module boundary created: availability check, error surface, future storage path notes.
+- `docs/JSON_CONTRACT.md` documents `--semantic` behavior and future `semantic_match` evidence type.
+- Default deterministic behavior is unchanged. All existing tests pass.
 
-Possible shape:
+Remaining for full implementation:
+
+- Bundle or configure a local embedding provider (no cloud APIs, no GPU required).
+- Implement `agentgrep index --semantic` to generate and store embedding vectors alongside `index.json`.
+- Implement `agentgrep find --semantic` to expand candidates using semantic similarity, labeled separately from deterministic evidence.
+- Set `coverage.semantic_status = "active"` and add `"semantic_match"` evidence entries.
+- Measure Mode D against Mode C baseline in `docs/evaluation/`.
+
+Shape (canonical, now matching existing flags):
 
 ```bash
 agentgrep index --semantic
 agentgrep find --semantic "where is auth state restored"
 ```
 
-or:
-
-```bash
-agentgrep find --deep "where is auth state restored"
-```
-
-Rules:
+Rules (unchanged):
 
 - disabled by default;
 - explicit flag required;
@@ -409,7 +416,7 @@ Rules:
 - no required GPU;
 - no server;
 - no hidden background work;
-- semantic candidates are labeled;
+- semantic candidates are labeled (`"semantic_match"` in evidence);
 - deterministic evidence still wins final ranking.
 
 Exit criteria:

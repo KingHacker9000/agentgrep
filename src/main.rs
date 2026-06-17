@@ -8,6 +8,7 @@ mod rank;
 mod related;
 mod repo;
 mod search;
+mod semantic;
 mod symbol;
 mod text;
 mod types;
@@ -32,8 +33,12 @@ fn run() -> Result<()> {
             exclude,
             role,
             match_mode,
+            semantic,
             json,
         } => {
+            if semantic {
+                semantic::require_configured("find")?;
+            }
             let started = std::time::Instant::now();
             let repo = repo::discover()?;
             let loaded = index::load(&repo)?;
@@ -81,7 +86,14 @@ fn run() -> Result<()> {
             };
             output::write_find_report(&report, json)?;
         }
-        cli::Commands::Index { status, clear } => {
+        cli::Commands::Index {
+            status,
+            clear,
+            semantic,
+        } => {
+            if semantic && !status && !clear {
+                semantic::require_configured("index")?;
+            }
             let repo = repo::discover()?;
             if clear {
                 let report = index::clear(&repo)?;

@@ -15,7 +15,7 @@ The contract is intended to stay stable during v0.x unless this document says ot
 - `index_status` reports the index state for the current command.
 - `index_used` means index facts contributed to `find` ranking or evidence.
 - `risk_level` is the conservative blast estimate: `low`, `medium`, or `high`.
-- Semantic or hybrid retrieval is future opt-in work only and is not present in the current JSON.
+- `coverage.semantic_status` reports whether semantic retrieval was active for a `find` response. Current values: `not_requested` (default, no `--semantic` flag passed). Future value `active` when a configured provider is used. Semantic mode is experimental and opt-in only via `--semantic`.
 
 ## `index_status`
 
@@ -51,7 +51,8 @@ Top-level shape:
     "match_limit_per_file": 0,
     "candidate_limit": 0,
     "index_used": false,
-    "index_status": "not_applicable"
+    "index_status": "not_applicable",
+    "semantic_status": "not_requested"
   },
   "candidates": [],
   "next_actions": []
@@ -78,6 +79,7 @@ Best-effort fields:
 - `coverage.candidate_limit`
 - `coverage.index_used`
 - `coverage.index_status`
+- `coverage.semantic_status`
 - candidate `snippets`
 - candidate `evidence`
 
@@ -293,4 +295,23 @@ Notes:
 - `risk_level` is a conservative estimate, not a guarantee.
 - `score` on impacted files is only comparable within this response.
 - `confidence` stays coarse and should not be treated as exact probability.
+
+## `--semantic` flag (experimental, not yet active)
+
+`find --semantic` and `index --semantic` are accepted flags but semantic retrieval is not yet configured. Both return a clear error when `--semantic` is passed:
+
+```
+`agentgrep find --semantic` is not yet available: no local embedding provider is configured.
+Use `agentgrep find` without --semantic for deterministic search.
+See ROADMAP.md Milestone 8 for the planned implementation.
+```
+
+When semantic becomes active in a future release:
+
+- `coverage.semantic_status` will change from `"not_requested"` to `"active"`.
+- Evidence entries with type `"semantic_match"` will appear in candidate evidence.
+- Semantic evidence is always labeled separately from deterministic evidence.
+- Default `find` behavior (no `--semantic`) will not change.
+
+Do not depend on semantic evidence being present. It is additive and opt-in only.
 

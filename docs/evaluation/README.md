@@ -87,25 +87,30 @@ What it adds over Mode B:
 
 ---
 
-### Mode D — agentgrep, indexed + semantic (future placeholder)
+### Mode D — agentgrep, indexed + semantic (flags exist; provider not yet configured)
 
-**Not yet implemented. Do not present as available.**
+**Semantic retrieval is not yet active. Do not present as available or benchmarked.**
 
-Planned shape when implemented:
+The CLI flags exist and are accepted:
 
 ```bash
 agentgrep index --semantic
 agentgrep find --semantic "where is auth state restored"
 ```
 
-Rules when it exists:
+Current behavior: both commands return a clear error explaining that no local embedding
+provider is configured. No silent fallback to deterministic mode.
+
+Rules when a provider is eventually configured:
 
 - disabled by default;
 - explicit flag required;
 - local-only embeddings;
 - no always-running model;
 - no GPU required;
-- semantic results labeled separately from deterministic results.
+- semantic evidence labeled separately (`"semantic_match"` in candidate evidence);
+- `coverage.semantic_status` changes from `"not_requested"` to `"active"`;
+- default deterministic behavior unchanged.
 
 ---
 

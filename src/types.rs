@@ -72,6 +72,10 @@ pub struct SearchCoverage {
     pub candidate_limit: usize,
     pub index_used: bool,
     pub index_status: String,
+    /// Whether semantic retrieval contributed to this response.
+    /// "not_requested": --semantic was not passed (default).
+    /// Future value "active" when a provider is configured and used.
+    pub semantic_status: String,
 }
 
 impl SearchCoverage {
@@ -89,6 +93,7 @@ impl SearchCoverage {
             candidate_limit: 0,
             index_used: false,
             index_status: "not_applicable".to_string(),
+            semantic_status: "not_requested".to_string(),
         }
     }
 
@@ -435,6 +440,17 @@ mod tests {
         assert_eq!(json["candidate_limit"], 8);
         assert_eq!(json["index_used"], false);
         assert_eq!(json["index_status"], "not_applicable");
+        assert_eq!(json["semantic_status"], "not_requested");
+    }
+
+    #[test]
+    fn coverage_semantic_status_defaults_to_not_requested() {
+        let coverage = SearchCoverage::new(0, 0, 20).finalize(0, 8);
+        let json = serde_json::to_value(&coverage).unwrap();
+        assert_eq!(
+            json["semantic_status"], "not_requested",
+            "semantic_status must default to not_requested when --semantic is not passed"
+        );
     }
 
     #[test]

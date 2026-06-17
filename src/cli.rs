@@ -48,6 +48,12 @@ pub enum Commands {
         /// Control whether files must match any or all significant query terms.
         #[arg(long = "match", value_enum, default_value_t = FindMatchSelection::Any)]
         match_mode: FindMatchSelection,
+        /// Enable semantic candidate expansion and reranking (requires a configured local provider).
+        #[arg(
+            long,
+            help = "Enable semantic candidate expansion and reranking (requires configured provider)."
+        )]
+        semantic: bool,
         /// Write stable JSON instead of text.
         #[arg(long, help = "Write stable JSON instead of text.")]
         json: bool,
@@ -64,6 +70,12 @@ pub enum Commands {
         /// Clear the stored index.
         #[arg(long, conflicts_with = "status", help = "Clear the stored index.")]
         clear: bool,
+        /// Prepare semantic embedding data in addition to the standard index (requires configured provider).
+        #[arg(
+            long,
+            help = "Prepare semantic embedding data (requires configured provider)."
+        )]
+        semantic: bool,
     },
     /// Inspect one file with indexed context.
     Map {
