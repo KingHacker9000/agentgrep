@@ -26,9 +26,17 @@ This document covers how to bump, build, verify, and ship a release of Agentgrep
    # expected: agentgrep 0.X.Y
    ```
 
-4. Update `docs/INSTALL.md` if the version example there is hardcoded.
+4. Add a new entry to `CHANGELOG.md`:
 
-5. Commit with message: `Bump version to 0.X.Y`
+   ```markdown
+   ## [0.X.Y] — YYYY-MM-DD
+
+   Short summary of what changed. Group by feature area, not by commit.
+   ```
+
+5. Update `docs/INSTALL.md` if the version example there is hardcoded.
+
+6. Commit with message: `Bump version to 0.X.Y`
 
 ---
 
@@ -241,7 +249,5 @@ If both `~/.cargo/bin/agentgrep` and another path appear, the first one wins. En
 Not yet done. Revisit after dogfooding:
 
 - GitHub Releases with attached binaries (Linux, macOS, Windows)
-- `cargo install --git <repo>` instructions (once repo is public)
 - Checksums for release binaries
-- Release notes / CHANGELOG
 - `cargo publish` to crates.io (after API stabilizes)

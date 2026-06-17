@@ -13,6 +13,8 @@ fast local code radar for coding agents.
 
 Agentgrep is a local, evidence-first CLI that helps coding agents decide where to look next.
 
+Coding agents spend context budget on repository navigation. Plain tools like `rg` return raw matches — the agent still has to rank files, trace symbols, and guess at impact. Agentgrep does that work instead: it groups results by file, ranks candidates with explainable heuristics, adds symbol and graph evidence from a lightweight optional index, and prints stable JSON an agent can act on directly. No LLM, no daemon, no background service.
+
 ## What is Agentgrep?
 
 Agentgrep is a small Rust CLI for codebase navigation.
@@ -25,53 +27,66 @@ There is no LLM, daemon, watcher, background service, or remote dependency in th
 
 ## Why not just `rg`?
 
-`rg` is still the fastest way to collect raw matches.
+`rg` is still the right tool for raw exact line search, and Agentgrep keeps it as the recall floor.
 
-Agentgrep sits on top of that recall floor and makes the first pass more agent-shaped:
+Agentgrep adds a layer on top for agent workflows:
 
-- it groups matches by file;
-- it ranks likely files with explainable heuristics;
-- it supports `--match any` and `--match all` for broad recall or stricter coverage;
-- `--include`, `--exclude`, and `--role` narrow results explicitly;
-- bare globs like `*.css` match by basename anywhere, while `src/**/*.css` stays path-specific;
-- it keeps line numbers and snippets attached;
-- it can use an optional local index to improve ranking and context;
-- it can print stable JSON for downstream tools.
+- groups matches by file so agents rank files, not lines;
+- ranks candidates with explainable heuristics (path tokens, symbol presence, graph edges);
+- supports `--match any` and `--match all` for broad or strict coverage;
+- `--include`, `--exclude`, and `--role` narrow results without manual grep chaining;
+- bare globs like `*.css` match by basename anywhere; `src/**/*.css` stays path-specific;
+- keeps line numbers and snippets attached to each file result;
+- optional index adds symbol context, inbound/outbound edges, and file roles;
+- `--json` prints a stable machine-readable shape agents can consume directly.
 
-If you just need raw search, `rg` is still the right tool.
+**The practical split:** use `rg` when you know exactly what string you want. Use Agentgrep when an agent needs ranked files, evidence, symbol context, relationships, JSON output, and impact hints.
 
 ## Install
 
-Build from source with stable Rust:
+Install from GitHub (no local clone needed):
+
+```bash
+cargo install --git https://github.com/KingHacker9000/agentgrep
+```
+
+Or build from a local clone:
 
 ```bash
 cargo install --path .
 ```
 
-For local development:
+For local development only (no install):
 
 ```bash
 cargo build
 ```
 
+Requirements: Rust stable (1.75+) and `rg` on PATH. See [docs/INSTALL.md](./docs/INSTALL.md) for full install and verification steps.
+
+**Docs:** [Install guide](./docs/INSTALL.md) · [Release checklist](./docs/RELEASE.md) · [JSON contract](./docs/JSON_CONTRACT.md) · [Agent skill docs](./skill-docs/) · [CHANGELOG](./CHANGELOG.md)
+
 ## Quick start
 
+The core navigation loop:
+
 ```bash
-agentgrep find "query"
+agentgrep find "auth redirect"         # rank files by evidence
+agentgrep map src/auth.rs              # inspect one file in context
+agentgrep symbol AuthHandler           # find definitions and callers
+agentgrep related src/auth.rs          # see nearby files and edges
+agentgrep blast src/auth.rs            # estimate likely impact before editing
+```
+
+Run `agentgrep index` once in a repo to unlock symbol extraction, graph edges, and better ranking across all commands.
+
+Other useful `find` flags:
+
+```bash
 agentgrep find "query" --match all
 agentgrep find "query" --include "*.css"
 agentgrep find "query" --role source
 agentgrep find "query" --json
-agentgrep index
-```
-
-Useful follow-ups:
-
-```bash
-agentgrep map <file>
-agentgrep symbol <name>
-agentgrep related <file-or-symbol>
-agentgrep blast <file-or-symbol>
 ```
 
 ## Command workflow
@@ -143,6 +158,18 @@ Current work stays focused on the deterministic local radar:
 - only then, optional semantic or hybrid retrieval as an explicit opt-in.
 
 Semantic or hybrid retrieval is future work only. It should remain optional and local-first if it is added at all.
+
+## What Agentgrep is and is not
+
+Agentgrep is an **agent-shaped code radar** that sits on top of fast local search. It is not a replacement for `rg`.
+
+| Tool | Best for |
+|---|---|
+| `rg` | Exact raw line search across a repo — fastest, no setup, no ranking needed |
+| `agentgrep find` | Agent needs ranked file candidates with evidence and optional JSON |
+| `agentgrep map/symbol/related/blast` | Agent needs local context, symbol graph, or impact estimate before editing |
+
+`rg` and Agentgrep are complementary. Use `rg` inside Agentgrep's recall floor; use Agentgrep when the agent needs ranked, explained, structured output.
 
 ## Philosophy / non-goals
 
