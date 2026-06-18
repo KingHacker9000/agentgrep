@@ -3,6 +3,8 @@
 /manual-test/
 /eval-worktree/
 /eval-results/
+tmp/
+logs/
 
 # Editor and OS noise
 .DS_Store
