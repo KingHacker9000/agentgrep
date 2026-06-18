@@ -158,7 +158,11 @@ pub fn rank_with_index(
             .then_with(|| left.0.path.cmp(&right.0.path))
     });
 
-    finalized.into_iter().map(|(c, _)| c).take(CANDIDATE_LIMIT).collect()
+    finalized
+        .into_iter()
+        .map(|(c, _)| c)
+        .take(CANDIDATE_LIMIT)
+        .collect()
 }
 
 pub fn next_actions(_query: &str, candidates: &[FileCandidate], repo_root: &str) -> Vec<String> {
@@ -472,7 +476,11 @@ fn collect_token_matches(
                     .iter()
                     .any(|m| is_bounded_occurrence(&normalize_phrase(&m.snippet), term));
             let snippet_score = if purely_embedded {
-                if profile.identifier_like { 0.04 } else { 0.03 }
+                if profile.identifier_like {
+                    0.04
+                } else {
+                    0.03
+                }
             } else if profile.identifier_like {
                 0.09
             } else {
