@@ -139,6 +139,7 @@ These are not current work. Add only if real codebase tests show a specific gap.
 | `README.md` | This file — scaffold overview and mode definitions |
 | `BENCHMARKS.md` | Public benchmark philosophy, repo criteria, how to extend and rerun |
 | `METRICS.md` | Metric definitions (automated + manual) and what not to overclaim |
+| `REPORTING.md` | How to generate, share, and extend the static HTML/Markdown report |
 | `TASK_SCHEMA.md` | Repo manifest, task, label, and mode-output schemas |
 | `TASKS.md` | Task categories and example prompts |
 | `RESULT_TEMPLATE.md` | Copy-paste template for recording one manual evaluation run |
@@ -152,6 +153,7 @@ The runnable harness lives in `scripts/`:
 |---|---|
 | `scripts/run-eval.ps1` | Clone pinned repos, run Modes A–D, capture raw output + latency |
 | `scripts/analyze-eval.py` | Compute metrics, write `summary.csv` / `summary.json` |
+| `scripts/render-eval-report.py` | Generate static HTML + Markdown report from eval outputs |
 
 ---
 
@@ -179,6 +181,12 @@ powershell -ExecutionPolicy Bypass -File scripts/run-eval.ps1 `
 python scripts/analyze-eval.py `
   --run-dir eval-results/<run-id> `
   --labels  docs/evaluation/labels/public-v0.1.jsonl
+
+# 4. Generate the static HTML + Markdown report.
+python scripts/render-eval-report.py `
+  --run-dir eval-results/<run-id> `
+  --labels  docs/evaluation/labels/public-v0.1.jsonl
+# Open eval-results/<run-id>/report/index.html in a browser.
 ```
 
 `run-eval.ps1 -Help` prints full options. Mode D is skipped unless
@@ -186,7 +194,8 @@ python scripts/analyze-eval.py `
 
 Outputs land under `eval-results/<run-id>/`: `raw/` (full stdout/stderr per
 run), `parsed/results.jsonl`, `run-meta.json`, and `summary.{csv,json}`.
-`eval-worktree/` and `eval-results/` are git-ignored.
+The report generator adds `report/index.html`, `report/report.md`, and
+`report/assets/*.svg`. `eval-worktree/` and `eval-results/` are git-ignored.
 
 See [BENCHMARKS.md](./BENCHMARKS.md) for philosophy and how to add a repo/task/
 label, [TASK_SCHEMA.md](./TASK_SCHEMA.md) for the data formats, and
