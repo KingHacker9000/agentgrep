@@ -75,6 +75,17 @@ impl Default for FindFilters {
     }
 }
 
+/// Shared lexical ranking entry point for all deterministic eval modes.
+///
+/// - Mode B (no index): called with `index = None`; only lexical signals score.
+/// - Mode C (indexed):  called with the loaded `RepoIndex`; symbol definitions,
+///   references, graph edges, and BM25 lex scores are all applied on top of the
+///   same lexical candidate set.
+/// - Mode D (semantic): identical to C here; `semantic::expand_candidates` is
+///   called by the caller *after* this function returns and can re-sort the list
+///   (score += similarity×0.3 for existing candidates; semantic-only candidates
+///   added at similarity×0.8) unless the query is identifier-like, in which case
+///   only annotation evidence is added and deterministic order is preserved.
 pub fn rank_with_index(
     query: &str,
     matches: Vec<SearchMatch>,

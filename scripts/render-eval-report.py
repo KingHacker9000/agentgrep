@@ -489,6 +489,188 @@ def get_slowest_queries(raw_results: List[Dict], max_n: int = 20) -> List[Dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Ranking-diagnostics helpers (B/C/D lexical-winner analysis)
+#
+# Modes B, C, D all run through rank::rank_with_index (the same Rust function).
+# B passes index=None; C passes the loaded lexical/symbol index; D is identical
+# to C at this stage and then calls semantic::expand_candidates afterwards.
+# expand_candidates can re-rank for non-identifier queries (score +=
+# similarity*0.3 for existing candidates, new semantic-only files at
+# similarity*0.8).  For identifier-like queries it only annotates; order is
+# preserved.  There is no guard protecting high-confidence lexical winners.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _raw_top_evidence(run_dir: Optional[Path], raw_stdout_path: Optional[str]) -> str:
+    """Best-effort: return score/confidence/evidence summary for top candidate in a raw .out file."""
+    if not raw_stdout_path or run_dir is None:
+        return "—"
+    try:
+        with open(run_dir / raw_stdout_path, encoding="utf-8-sig") as fh:
+            data = json.load(fh)
+        cands = data.get("candidates") or []
+        if not cands:
+            return "(empty)"
+        c = cands[0]
+        score = c.get("score")
+        conf = c.get("confidence", "?")
+        ev_types = list(dict.fromkeys(
+            e.get("type", "") for e in (c.get("evidence") or []) if e.get("type")
+        ))[:4]
+        score_str = f"{score:.2f}" if isinstance(score, (int, float)) else "?"
+        return f"score={score_str} conf={conf} ev=[{', '.join(ev_types) or 'none'}]"
+    except Exception:
+        return "—"
+
+
+def _rank_of(path: Optional[str], ranked: List[str]) -> Optional[int]:
+    """Return 1-based position of path in ranked list, or None if absent."""
+    if not path:
+        return None
+    try:
+        return ranked.index(path) + 1
+    except ValueError:
+        return None
+
+
+def get_hit1_drop_tasks(
+    scored: List[Dict],
+    hi_mode: str,
+    lo_mode: str,
+    max_n: int = 30,
+) -> List[str]:
+    """Return sorted task IDs where hi_mode has Hit@1=1 but lo_mode does not (both modes present)."""
+    by_task = _index_by_task_mode(scored)
+    out = []
+    for tid in sorted(by_task):
+        modes = by_task[tid]
+        hi = modes.get(hi_mode)
+        lo = modes.get(lo_mode)
+        if hi and lo and hi.get("hit@1") == 1.0 and lo.get("hit@1") != 1.0:
+            out.append(tid)
+    return out[:max_n]
+
+
+def get_demotion_tasks(
+    raw_results: List[Dict],
+    base_mode: str,
+    other_mode: str,
+    max_n: int = 30,
+) -> List[str]:
+    """Return task IDs where base_mode rank-1 path appears in other_mode top-8 but is not rank-1.
+
+    Does not require labels — purely a ranking-order comparison.
+    """
+    by_task = _index_by_task_mode(raw_results)
+    out = []
+    for tid in sorted(by_task):
+        modes = by_task[tid]
+        base = modes.get(base_mode)
+        other = modes.get(other_mode)
+        if not (base and other):
+            continue
+        b_paths = _coerce_paths(base.get("ranked_paths"))
+        o_paths = _coerce_paths(other.get("ranked_paths"))
+        b_top = b_paths[0] if b_paths else None
+        if not b_top:
+            continue
+        rank = _rank_of(b_top, o_paths)
+        if rank is not None and rank > 1:
+            out.append(tid)
+    return out[:max_n]
+
+
+def build_diag_rows(
+    task_ids: List[str],
+    by_task_raw: Dict[str, Dict[str, Dict]],
+    scored_by_task: Dict[str, Dict[str, Dict]],
+    run_dir: Optional[Path],
+) -> List[Dict]:
+    """Build a standard diagnostic dict for each task_id with all B/C/D comparison columns."""
+    rows = []
+    for tid in task_ids:
+        raw_modes = by_task_raw.get(tid, {})
+        sc_modes = scored_by_task.get(tid, {})
+        first = next(iter(raw_modes.values()), {})
+
+        def ranked_for(mode: str) -> List[str]:
+            r = sc_modes.get(mode) or raw_modes.get(mode)
+            if not r:
+                return []
+            return _coerce_paths(r.get("ranked") or r.get("ranked_paths"))
+
+        b, c, d = ranked_for("B"), ranked_for("C"), ranked_for("D")
+        b_top = b[0] if b else None
+        c_top = c[0] if c else None
+        d_top = d[0] if d else None
+
+        def ev(mode: str) -> str:
+            r = raw_modes.get(mode)
+            return _raw_top_evidence(run_dir, r.get("raw_stdout_path") if r else None)
+
+        rows.append({
+            "task_id": tid,
+            "repo": first.get("repo_id", ""),
+            "task_type": first.get("task_type", ""),
+            "query": first.get("query", ""),
+            "b_top": b_top,
+            "c_top": c_top,
+            "d_top": d_top,
+            "b_top3": b[:3],
+            "c_top3": c[:3],
+            "d_top3": d[:3],
+            "b_in_c8": (b_top in set(c[:8])) if b_top else None,
+            "b_in_d8": (b_top in set(d[:8])) if b_top else None,
+            "b_rank_in_c": _rank_of(b_top, c),
+            "b_rank_in_d": _rank_of(b_top, d),
+            "b_ev": ev("B"),
+            "c_ev": ev("C"),
+            "d_ev": ev("D"),
+        })
+    return rows
+
+
+def _html_diag_table(rows: List[Dict], row_class: str = "loss") -> str:
+    """Render the wide B/C/D diagnostic table as HTML."""
+    if not rows:
+        return '<p class="muted">None found.</p>'
+    hdrs = [
+        "Task ID", "Repo", "Type", "Query",
+        "B top path", "C top path", "D top path",
+        "B top-3", "C top-3", "D top-3",
+        "B in C8?", "B in D8?",
+        "B rank→C", "B rank→D",
+        "B top evidence", "C top evidence", "D top evidence",
+    ]
+
+    def yn(v: Any) -> str:
+        if v is None:
+            return "—"
+        return "yes" if v else '<span style="color:#c00">no</span>'
+
+    def rk(v: Any) -> str:
+        return str(v) if v is not None else "—"
+
+    def mono(s: Any) -> str:
+        return f'<span class="mono">{_h(s or "—")}</span>'
+
+    table_rows = [
+        [
+            _h(r["task_id"]), _h(r["repo"]), _h(r["task_type"]),
+            _h(r["query"])[:70],
+            mono(r["b_top"]), mono(r["c_top"]), mono(r["d_top"]),
+            _paths_cell(r["b_top3"]), _paths_cell(r["c_top3"]), _paths_cell(r["d_top3"]),
+            yn(r["b_in_c8"]), yn(r["b_in_d8"]),
+            rk(r["b_rank_in_c"]), rk(r["b_rank_in_d"]),
+            f'<span class="mono" style="font-size:10px">{_h(r["b_ev"])}</span>',
+            f'<span class="mono" style="font-size:10px">{_h(r["c_ev"])}</span>',
+            f'<span class="mono" style="font-size:10px">{_h(r["d_ev"])}</span>',
+        ]
+        for r in rows
+    ]
+    return _html_table(hdrs, table_rows, row_classes=[row_class] * len(table_rows))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Chart generation
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1051,6 +1233,61 @@ def make_html(
         ]
         body.append(_html_table(sl_hdrs, sl_rows))
 
+    # ── ranking diagnostics ───────────────────────────────────────────────────
+    body.append('<h2>Ranking Diagnostics (B/C/D Lexical-Winner Analysis)</h2>')
+    body.append(
+        '<p>Modes B, C, and D all pass through the same '
+        '<code>rank_with_index</code> lexical scoring function. '
+        'Mode C additionally applies index evidence (symbol definitions, references, graph edges). '
+        'Mode D applies the same index evidence and then re-sorts via '
+        '<code>expand_candidates</code> (semantic cosine boost), which <strong>can demote '
+        'a lexical rank-1 winner</strong> for non-identifier queries — no guard protects '
+        'high-confidence lexical hits. For identifier-like queries (CamelCase / snake_case) '
+        'semantic only annotates; deterministic order is preserved.</p>'
+    )
+
+    by_task_raw = _index_by_task_mode(raw_results)
+    scored_by_task: Dict[str, Dict[str, Dict]] = (
+        _index_by_task_mode(scored) if scored else {}
+    )
+
+    # ── hit@1 drop tables (require labels) ───────────────────────────────────
+    if has_labels and scored:
+        for hi_m, lo_m, label in [
+            ("B", "C", "B Hit@1=1, C Hit@1=0"),
+            ("B", "D", "B Hit@1=1, D Hit@1=0"),
+            ("C", "D", "C Hit@1=1, D Hit@1=0 (semantic regression)"),
+        ]:
+            drop_ids = get_hit1_drop_tasks(scored, hi_m, lo_m)
+            body.append(f'<h3>{_h(label)} — {len(drop_ids)} task(s)</h3>')
+            if drop_ids:
+                diag_rows = build_diag_rows(drop_ids, by_task_raw, scored_by_task, run_dir)
+                body.append(_html_diag_table(diag_rows))
+            else:
+                body.append(
+                    f'<p class="muted">No tasks where {hi_m} Hit@1=1 and {lo_m} Hit@1=0.</p>'
+                )
+    else:
+        body.append(
+            '<div class="note">Hit@1 drop tables require labels. '
+            'Re-run with <code>--labels</code> to enable.</div>'
+        )
+
+    # ── path demotion tables (no labels required) ─────────────────────────────
+    for base_m, other_m, label in [
+        ("B", "C", "B rank-1 in C top-8 but demoted (index signals displaced lexical winner)"),
+        ("B", "D", "B rank-1 in D top-8 but demoted (semantic or index displaced lexical winner)"),
+    ]:
+        dem_ids = get_demotion_tasks(raw_results, base_m, other_m)
+        body.append(f'<h3>{_h(label)} — {len(dem_ids)} task(s)</h3>')
+        if dem_ids:
+            diag_rows = build_diag_rows(dem_ids, by_task_raw, scored_by_task, run_dir)
+            body.append(_html_diag_table(diag_rows, row_class="note"))
+        else:
+            body.append(
+                f'<p class="muted">No tasks where {base_m} rank-1 was demoted in {other_m}.</p>'
+            )
+
     # ── per-task detail ───────────────────────────────────────────────────────
     if raw_results:
         by_task_mode = _index_by_task_mode(raw_results)
@@ -1253,6 +1490,97 @@ def make_markdown(
                 lines.append(
                     f"- `{r['task_id']}` ({r['repo_id']}, {r['task_type']}): "
                     "C had Hit@1, D did not"
+                )
+            lines.append("")
+
+    # Ranking diagnostics summary
+    lines += ["## Ranking Diagnostics (B/C/D Lexical-Winner Analysis)\n"]
+    lines += [
+        "Modes B, C, and D all share the same `rank_with_index` lexical scoring function. "
+        "C adds index evidence (symbols, edges). D adds semantic cosine re-ranking on top. "
+        "For non-identifier queries, `expand_candidates` can demote a lexical rank-1 winner "
+        "with no explicit guard protecting high-confidence lexical hits.\n",
+    ]
+
+    by_task_raw_md = _index_by_task_mode(raw_results)
+    scored_by_task_md: Dict[str, Dict[str, Dict]] = (
+        _index_by_task_mode(scored) if has_labels and scored else {}
+    )
+
+    lines.append("| Diagnostic | Count |")
+    lines.append("|------------|-------|")
+    if has_labels and scored:
+        for hi_m, lo_m, label in [
+            ("B", "C", "B Hit@1=1, C Hit@1=0"),
+            ("B", "D", "B Hit@1=1, D Hit@1=0"),
+            ("C", "D", "C Hit@1=1, D Hit@1=0"),
+        ]:
+            n = len(get_hit1_drop_tasks(scored, hi_m, lo_m))
+            lines.append(f"| {label} | {n} |")
+    else:
+        lines.append("| Hit@1 drop tables | *requires --labels* |")
+
+    for base_m, other_m, label in [
+        ("B", "C", "B rank-1 demoted in C top-8"),
+        ("B", "D", "B rank-1 demoted in D top-8"),
+    ]:
+        n = len(get_demotion_tasks(raw_results, base_m, other_m))
+        lines.append(f"| {label} | {n} |")
+    lines.append("")
+
+    if has_labels and scored:
+        # Show task IDs for each non-empty drop category
+        for hi_m, lo_m, label in [
+            ("B", "C", "B Hit@1=1, C Hit@1=0"),
+            ("B", "D", "B Hit@1=1, D Hit@1=0"),
+            ("C", "D", "C Hit@1=1, D Hit@1=0"),
+        ]:
+            drops = get_hit1_drop_tasks(scored, hi_m, lo_m, max_n=10)
+            if drops:
+                lines.append(f"### {label}\n")
+                for tid in drops:
+                    raw_m = by_task_raw_md.get(tid, {})
+                    sc_m = scored_by_task_md.get(tid, {})
+                    first = next(iter(raw_m.values()), {})
+                    b_ranked = _coerce_paths((sc_m.get("B") or raw_m.get("B", {})).get("ranked") or
+                                            (sc_m.get("B") or raw_m.get("B", {})).get("ranked_paths"))
+                    c_ranked = _coerce_paths((sc_m.get("C") or raw_m.get("C", {})).get("ranked") or
+                                            (sc_m.get("C") or raw_m.get("C", {})).get("ranked_paths"))
+                    d_ranked = _coerce_paths((sc_m.get("D") or raw_m.get("D", {})).get("ranked") or
+                                            (sc_m.get("D") or raw_m.get("D", {})).get("ranked_paths"))
+                    b_top = b_ranked[0] if b_ranked else "—"
+                    c_top = c_ranked[0] if c_ranked else "—"
+                    d_top = d_ranked[0] if d_ranked else "—"
+                    b_in_c = b_top in set(c_ranked[:8]) if b_ranked and c_ranked else False
+                    b_rank_c = _rank_of(b_top if b_ranked else None, c_ranked)
+                    lines.append(
+                        f"- `{tid}` ({first.get('repo_id','')}): "
+                        f"B→`{b_top}` C→`{c_top}` D→`{d_top}`"
+                        + (f" | B in C top-8 at rank {b_rank_c}" if b_in_c and b_rank_c else "")
+                    )
+                lines.append("")
+
+    # Demotion tasks
+    for base_m, other_m, label in [
+        ("B", "C", "B rank-1 demoted in C top-8"),
+        ("B", "D", "B rank-1 demoted in D top-8"),
+    ]:
+        dems = get_demotion_tasks(raw_results, base_m, other_m, max_n=10)
+        if dems:
+            lines.append(f"### {label}\n")
+            for tid in dems:
+                raw_m = by_task_raw_md.get(tid, {})
+                sc_m = scored_by_task_md.get(tid, {})
+                first = next(iter(raw_m.values()), {})
+                b_ranked = _coerce_paths(raw_m.get("B", {}).get("ranked_paths"))
+                o_ranked = _coerce_paths(raw_m.get(other_m, {}).get("ranked_paths"))
+                b_top = b_ranked[0] if b_ranked else "—"
+                o_top = o_ranked[0] if o_ranked else "—"
+                rank = _rank_of(b_top if b_ranked else None, o_ranked)
+                lines.append(
+                    f"- `{tid}` ({first.get('repo_id','')}): "
+                    f"B rank-1=`{b_top}` → {other_m} rank-1=`{o_top}` "
+                    f"(B path at {other_m} rank {rank})"
                 )
             lines.append("")
 
