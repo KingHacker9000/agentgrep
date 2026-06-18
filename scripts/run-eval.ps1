@@ -45,6 +45,15 @@
     Path to the agentgrep binary. If omitted, uses 'agentgrep' on PATH, else
     builds target/release/agentgrep with cargo.
 
+.PARAMETER Repo
+    Comma-separated list of repo IDs to run (e.g. "agentgrep,ripgrep"). May be
+    specified multiple times. When omitted, all repos with tasks are run.
+
+.PARAMETER OnlyLabeled
+    Restrict the task set to tasks that have at least one entry in LabelFile.
+    Also skips repo checkout/indexing for repos that have no labeled tasks
+    after filtering. Implies reading the label file before the run loop.
+
 .PARAMETER EnableSemantic
     Enable Mode D. Builds a semantic index per repo (downloads the embedding
     model on first use). Without this switch, Mode D is skipped.
@@ -60,6 +69,15 @@
       -RepoManifest docs/evaluation/public-repos.jsonl `
       -TaskFile docs/evaluation/tasks/public-v0.1.jsonl `
       -LabelFile docs/evaluation/labels/public-v0.1.jsonl
+
+.EXAMPLE
+    powershell -ExecutionPolicy Bypass -File scripts/run-eval.ps1 -Repo agentgrep,ripgrep
+
+.EXAMPLE
+    powershell -ExecutionPolicy Bypass -File scripts/run-eval.ps1 -OnlyLabeled
+
+.EXAMPLE
+    powershell -ExecutionPolicy Bypass -File scripts/run-eval.ps1 -Repo ripgrep -OnlyLabeled
 #>
 [CmdletBinding()]
 param(
@@ -70,6 +88,8 @@ param(
     [string]$WorktreeDir = 'eval-worktree',
     [string]$RunId = (Get-Date -Format 'yyyy-MM-dd-HHmmss'),
     [string]$AgentgrepBin = '',
+    [string[]]$Repo = @(),
+    [switch]$OnlyLabeled,
     [switch]$EnableSemantic,
     [switch]$Help
 )
@@ -100,6 +120,57 @@ function Read-Jsonl {
         $items += ($trim | ConvertFrom-Json)
     }
     return $items
+}
+
+function Assert-RequiredProps {
+    # Drops rows that are null or missing any required property; warns per dropped row.
+    # Returns only rows that have every required property — safe to access under StrictMode.
+    param(
+        [object[]]$Items,
+        [string[]]$Required,
+        [string]$Source
+    )
+    $valid = @()
+    foreach ($item in $Items) {
+        if ($null -eq $item) {
+            Write-Warning "$($Source): dropping null row."
+            continue
+        }
+        $propNames = $item.PSObject.Properties.Name
+        $missing = @($Required | Where-Object { $propNames -notcontains $_ })
+        if ($missing.Count -gt 0) {
+            Write-Warning "$($Source): dropping row missing field(s): $($missing -join ', '). Row: $($item | ConvertTo-Json -Compress -Depth 2)"
+            continue
+        }
+        $valid += $item
+    }
+    return $valid
+}
+
+function Get-JsonProp {
+    # Safely reads a named property from a PSCustomObject without throwing under
+    # Set-StrictMode -Version Latest. Returns $null if the object is null or the
+    # property does not exist.
+    #
+    # Checks two layers:
+    #   1. $Object.PSObject.Properties  — normal path for fresh PSCustomObjects.
+    #   2. $Object.PSObject.BaseObject.PSObject.Properties — PS 5.1 wraps objects
+    #      in a PSObject shell when they pass through certain pipeline stages; the
+    #      NoteProperties from ConvertFrom-Json end up on the inner BaseObject.
+    param([object]$Object, [string]$Name)
+    if ($null -eq $Object) { return $null }
+    # Layer 1: top-level PSObject (covers most cases).
+    if ($Object.PSObject.Properties.Name -contains $Name) {
+        return $Object.PSObject.Properties[$Name].Value
+    }
+    # Layer 2: unwrap one PSObject shell (covers pipeline-wrapped objects).
+    $base = $Object.PSObject.BaseObject
+    if ($null -ne $base -and -not [object]::ReferenceEquals($base, $Object)) {
+        if ($base.PSObject.Properties.Name -contains $Name) {
+            return $base.PSObject.Properties[$Name].Value
+        }
+    }
+    return $null
 }
 
 function Get-RelPath {
@@ -235,8 +306,98 @@ function Remove-Index {
 $bin = Resolve-AgentgrepBin -Explicit $AgentgrepBin
 Write-Host "==> agentgrep binary: $bin"
 
-$repos = Read-Jsonl $RepoManifest
-$tasks = Read-Jsonl $TaskFile
+$repos = Assert-RequiredProps `
+    -Items (Read-Jsonl $RepoManifest) `
+    -Required @('repo_id', 'url', 'commit') `
+    -Source $RepoManifest
+$tasks = Assert-RequiredProps `
+    -Items (Read-Jsonl $TaskFile) `
+    -Required @('task_id', 'repo_id', 'task_type', 'query') `
+    -Source $TaskFile
+
+# ---------------------------------------------------------------------------
+# Filtering: -Repo and/or -OnlyLabeled
+# ---------------------------------------------------------------------------
+# All filtering uses explicit foreach loops rather than Where-Object pipelines
+# so that $repos/$tasks always remain arrays of the original full manifest
+# objects. Pipeline Where-Object in PS 5.1 can return PSObject-wrapped copies
+# whose NoteProperties are not visible to Get-JsonProp in a subsequent foreach
+# iterator — the explicit loop avoids that wrapping entirely.
+
+# Normalise -Repo: split any comma-joined strings so both
+#   -Repo agentgrep,ripgrep  and  -Repo agentgrep -Repo ripgrep  work.
+$repoFilter = @($Repo | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '' })
+
+if ($repoFilter.Count -gt 0) {
+    # Build a hashtable for O(1) membership tests.
+    $repoFilterSet = @{}
+    foreach ($id in $repoFilter) { $repoFilterSet[$id] = $true }
+
+    $filteredTasks = @()
+    foreach ($t in $tasks) {
+        if ($repoFilterSet.ContainsKey((Get-JsonProp $t 'repo_id'))) { $filteredTasks += $t }
+    }
+    $tasks = $filteredTasks
+
+    $filteredRepos = @()
+    foreach ($r in $repos) {
+        if ($repoFilterSet.ContainsKey((Get-JsonProp $r 'repo_id'))) { $filteredRepos += $r }
+    }
+    $repos = $filteredRepos
+
+    # Warn about requested IDs that matched no manifest entry.
+    $matchedIds = @{}
+    foreach ($r in $repos) { $matchedIds[(Get-JsonProp $r 'repo_id')] = $true }
+    foreach ($id in $repoFilter) {
+        if (-not $matchedIds.ContainsKey($id)) {
+            Write-Warning "-Repo filter '$id' did not match any repo in the manifest."
+        }
+    }
+}
+
+if ($OnlyLabeled) {
+    if (-not (Test-Path $LabelFile)) { throw "-OnlyLabeled: label file not found: $LabelFile" }
+    $labels = Assert-RequiredProps `
+        -Items (Read-Jsonl $LabelFile) `
+        -Required @('task_id') `
+        -Source $LabelFile
+
+    # Build a hashtable of labeled task IDs for O(1) lookup.
+    $labeledIdSet = @{}
+    foreach ($lbl in $labels) {
+        $tid = Get-JsonProp $lbl 'task_id'
+        if ($null -ne $tid) { $labeledIdSet[$tid] = $true }
+    }
+
+    # 1. Filter $tasks to labeled task IDs only.
+    $filteredTasks = @()
+    foreach ($t in $tasks) {
+        if ($labeledIdSet.ContainsKey((Get-JsonProp $t 'task_id'))) { $filteredTasks += $t }
+    }
+    $tasks = $filteredTasks
+
+    # 2. Compute surviving repo IDs from the now-filtered $tasks.
+    $survivingRepoIds = @{}
+    foreach ($t in $tasks) {
+        $rid = Get-JsonProp $t 'repo_id'
+        if ($null -ne $rid) { $survivingRepoIds[$rid] = $true }
+    }
+
+    # 3. Filter $repos to full manifest objects whose repo_id is in that set.
+    $filteredRepos = @()
+    foreach ($r in $repos) {
+        if ($survivingRepoIds.ContainsKey((Get-JsonProp $r 'repo_id'))) { $filteredRepos += $r }
+    }
+    $repos = $filteredRepos
+
+    Write-Host "==> [filter] -OnlyLabeled: $($labeledIdSet.Count) labeled task(s) in label file"
+}
+
+# Print selection summary — read repo_id from each full object.
+$selectedRepoIds = @()
+foreach ($r in $repos) { $selectedRepoIds += (Get-JsonProp $r 'repo_id') }
+Write-Host "==> [filter] repos selected  : $($selectedRepoIds.Count) ($($selectedRepoIds -join ', '))"
+Write-Host "==> [filter] tasks selected  : $($tasks.Count)"
 
 $runRoot = Join-Path $OutDir $RunId
 $rawDir = Join-Path $runRoot 'raw'
@@ -254,16 +415,20 @@ $rgVersion = $null
 $rgCmd = Get-Command 'rg' -ErrorAction SilentlyContinue
 if ($rgCmd) { $rgVersion = (& rg --version | Select-Object -First 1) }
 $meta = [ordered]@{
-    run_id           = $RunId
-    timestamp_utc    = (Get-Date).ToUniversalTime().ToString('o')
-    agentgrep_bin    = $bin
+    run_id            = $RunId
+    timestamp_utc     = (Get-Date).ToUniversalTime().ToString('o')
+    agentgrep_bin     = $bin
     agentgrep_version = "$agVersion"
-    rg_version       = "$rgVersion"
-    os               = "$([System.Environment]::OSVersion.VersionString)"
-    repo_manifest    = $RepoManifest
-    task_file        = $TaskFile
-    label_file       = $LabelFile
-    semantic_enabled = [bool]$EnableSemantic
+    rg_version        = "$rgVersion"
+    os                = "$([System.Environment]::OSVersion.VersionString)"
+    repo_manifest     = $RepoManifest
+    task_file         = $TaskFile
+    label_file        = $LabelFile
+    semantic_enabled  = [bool]$EnableSemantic
+    filter_repos      = if ($repoFilter.Count -gt 0) { $repoFilter } else { $null }
+    filter_only_labeled = [bool]$OnlyLabeled
+    selected_repos    = @(foreach ($r in $repos) { Get-JsonProp $r 'repo_id' })
+    selected_task_count = $tasks.Count
 }
 $meta | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $runRoot 'run-meta.json') -Encoding utf8
 
@@ -297,20 +462,108 @@ function New-BaseRecord {
     }
 }
 
-foreach ($repo in $repos) {
-    $repoTasks = @($tasks | Where-Object { $_.repo_id -eq $repo.repo_id })
-    if ($repoTasks.Count -eq 0) {
-        Write-Host "==> [$($repo.repo_id)] no tasks; skipping"
-        continue
+# ---------------------------------------------------------------------------
+# Defensive pre-flight before the run loop
+# ---------------------------------------------------------------------------
+
+# 1. Every selected repo object must be a full manifest object with repo_id,
+#    url, and commit. This catches pipeline wrapping or any other loss of the
+#    original PSCustomObject fields before the loop ever runs.
+$badRepos = @()
+foreach ($r in $repos) {
+    $rid     = Get-JsonProp $r 'repo_id'
+    $rurl    = Get-JsonProp $r 'url'
+    $rcommit = Get-JsonProp $r 'commit'
+    if ($null -eq $rid -or $null -eq $rurl -or $null -eq $rcommit) {
+        $typeName = if ($null -eq $r) { '<null>' } else { $r.GetType().FullName }
+        $repr = try { $r | ConvertTo-Json -Compress -Depth 2 } catch { '<unserializable>' }
+        $badRepos += "  type=$typeName  rid='$rid'  repr=$repr"
+    }
+}
+if ($badRepos.Count -gt 0) {
+    Write-Host "ERROR: $($badRepos.Count) repo object(s) are missing required fields (repo_id/url/commit):"
+    foreach ($msg in $badRepos) { Write-Host $msg }
+    throw "run-eval: aborting - repo objects above are malformed. Check $RepoManifest."
+}
+$verifiedRepoIds = @()
+foreach ($r in $repos) { $verifiedRepoIds += (Get-JsonProp $r 'repo_id') }
+Write-Host "==> [pre-flight] repo objects OK: $($verifiedRepoIds -join ', ')"
+
+# 2. Every remaining task row must have a non-null repo_id.
+$badTasks = @()
+foreach ($t in $tasks) {
+    if ($null -eq (Get-JsonProp $t 'repo_id')) { $badTasks += $t }
+}
+if ($badTasks.Count -gt 0) {
+    Write-Host "ERROR: $($badTasks.Count) task row(s) are missing 'repo_id':"
+    foreach ($bt in $badTasks) {
+        $typeName = if ($null -eq $bt) { '<null>' } else { $bt.GetType().FullName }
+        $repr = try { $bt | ConvertTo-Json -Compress -Depth 2 } catch { '<unserializable>' }
+        Write-Host "  type=$typeName  repr=$repr"
+    }
+    throw "run-eval: aborting - task rows above are missing 'repo_id'. Check $TaskFile."
+}
+
+# 3. Print task counts grouped by repo_id via Get-JsonProp (same helper used in
+#    the loop). If a selected repo shows 0 here, the loop will also see 0 — fail
+#    now with a diagnostic dump of the first few task objects.
+$taskCountByRepo = @{}
+foreach ($t in $tasks) {
+    $rid = Get-JsonProp $t 'repo_id'
+    if ($null -ne $rid) {
+        if ($taskCountByRepo.ContainsKey($rid)) { $taskCountByRepo[$rid]++ }
+        else                                     { $taskCountByRepo[$rid] = 1 }
+    }
+}
+$taskCountParts = @()
+foreach ($entry in ($taskCountByRepo.GetEnumerator() | Sort-Object Key)) {
+    $taskCountParts += "$($entry.Key)=$($entry.Value)"
+}
+Write-Host "==> [pre-flight] task counts by repo: $($taskCountParts -join ', ')"
+
+foreach ($r in $repos) {
+    $rid = Get-JsonProp $r 'repo_id'
+    $cnt = if ($taskCountByRepo.ContainsKey($rid)) { $taskCountByRepo[$rid] } else { 0 }
+    if ($cnt -eq 0) {
+        Write-Host "ERROR: selected repo '$rid' has zero tasks after Get-JsonProp grouping."
+        Write-Host "       First 3 task objects for diagnosis:"
+        $diagIdx = 0
+        foreach ($t in $tasks) {
+            if ($diagIdx -ge 3) { break }
+            $typeName = if ($null -eq $t) { '<null>' } else { $t.GetType().FullName }
+            $repr = try { $t | ConvertTo-Json -Compress -Depth 2 } catch { '<unserializable>' }
+            Write-Host "  [$diagIdx] type=$typeName  repo_id_via_helper='$(Get-JsonProp $t 'repo_id')'  repr=$repr"
+            $diagIdx++
+        }
+        throw "run-eval: aborting - task/repo grouping mismatch. Check $TaskFile and $RepoManifest."
+    }
+}
+
+foreach ($repoRec in $repos) {
+    $repoId = Get-JsonProp $repoRec 'repo_id'
+    if ($null -eq $repoId -or $repoId -eq '') {
+        $typeName = if ($null -eq $repoRec) { '<null>' } else { $repoRec.GetType().FullName }
+        throw "run-eval: repo object has null/empty repo_id inside loop (type=$typeName). Check $RepoManifest."
     }
 
-    $repoDir = Join-Path $WorktreeDir $repo.repo_id
-    Write-Host "==> [$($repo.repo_id)] preparing checkout at $($repo.commit)"
+    $repoTasks = foreach ($task in $tasks) {
+        if ((Get-JsonProp $task 'repo_id') -eq $repoId) { $task }
+    }
+    $repoTasks = @($repoTasks)
+
+    if ($repoTasks.Count -eq 0) {
+        throw "run-eval: selected repo '$repoId' has zero matching tasks inside loop. This should not happen after pre-flight."
+    }
+
+    $repoCommit = Get-JsonProp $repoRec 'commit'
+    $repoUrl    = Get-JsonProp $repoRec 'url'
+    $repoDir = Join-Path $WorktreeDir $repoId
+    Write-Host "==> [$repoId] preparing checkout at $repoCommit"
     if (-not (Test-Path (Join-Path $repoDir '.git'))) {
-        git clone --quiet $repo.url $repoDir
+        git clone --quiet $repoUrl $repoDir
     }
     git -C $repoDir fetch --quiet --tags origin 2>$null | Out-Null
-    git -C $repoDir checkout --quiet $repo.commit
+    git -C $repoDir checkout --quiet $repoCommit
     $repoDirFull = (Resolve-Path $repoDir).Path
 
     # Mode A + B run on a fresh (index-free) checkout.
@@ -358,22 +611,22 @@ foreach ($repo in $repos) {
     }
 
     # ---- Build index for Mode C ----
-    Write-Host "==> [$($repo.repo_id)] building index (Mode C)"
-    $idxOut = Join-Path $rawDir "_index-$($repo.repo_id).out"
-    $idxErr = Join-Path $rawDir "_index-$($repo.repo_id).err"
+    Write-Host "==> [$repoId] building index (Mode C)"
+    $idxOut = Join-Path $rawDir "_index-$repoId.out"
+    $idxErr = Join-Path $rawDir "_index-$repoId.err"
     $idxCap = Invoke-Capture -FilePath $bin -Arguments @('index') -WorkDir $repoDirFull -OutFile $idxOut -ErrFile $idxErr
     $indexOk = ($idxCap.ExitCode -eq 0)
-    if (-not $indexOk) { Write-Warning "[$($repo.repo_id)] index build failed (exit $($idxCap.ExitCode)); Mode C will reflect that." }
+    if (-not $indexOk) { Write-Warning "[$repoId] index build failed (exit $($idxCap.ExitCode)); Mode C will reflect that." }
 
     # ---- Build semantic index for Mode D (optional) ----
     $semanticOk = $false
     if ($EnableSemantic) {
-        Write-Host "==> [$($repo.repo_id)] building semantic index (Mode D)"
-        $semOut = Join-Path $rawDir "_semantic-$($repo.repo_id).out"
-        $semErr = Join-Path $rawDir "_semantic-$($repo.repo_id).err"
+        Write-Host "==> [$repoId] building semantic index (Mode D)"
+        $semOut = Join-Path $rawDir "_semantic-$repoId.out"
+        $semErr = Join-Path $rawDir "_semantic-$repoId.err"
         $semCap = Invoke-Capture -FilePath $bin -Arguments @('index', '--semantic', '--yes') -WorkDir $repoDirFull -OutFile $semOut -ErrFile $semErr
         $semanticOk = ($semCap.ExitCode -eq 0)
-        if (-not $semanticOk) { Write-Warning "[$($repo.repo_id)] semantic index unavailable; Mode D skipped." }
+        if (-not $semanticOk) { Write-Warning "[$repoId] semantic index unavailable; Mode D skipped." }
     }
 
     foreach ($task in $repoTasks) {
