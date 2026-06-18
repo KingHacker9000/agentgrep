@@ -458,11 +458,20 @@ fn collect_token_matches(
         }
 
         if snippet_hit {
-            // Short terms (≤3 chars) in multi-word queries are prone to spurious
-            // substring matches (e.g. "on" in "configuration", "rg" in "agentgrep").
-            // Reduce their per-snippet weight to prevent noisy common-term doc inflation.
-            let short_in_multi = profile.terms.len() >= 3 && term.len() <= 3;
-            let snippet_score = if short_in_multi {
+            // A short term that appears only as a fragment of a longer word ("rg"
+            // inside "cargo", "cd" inside "discard") is incidental.  The same term
+            // occurring as a bounded token — command name, path segment, symbol,
+            // method call, or part of the exact phrase — is real evidence.
+            // Only apply the reduced weight when the term is short (≤3 chars) in a
+            // multi-term query (≥3 terms) and no snippet contains it as a bounded
+            // occurrence; exact whole-token matches, quoted names, and symbol
+            // components all keep full weight.
+            let purely_embedded = profile.terms.len() >= 3
+                && term.len() <= 3
+                && !matches
+                    .iter()
+                    .any(|m| is_bounded_occurrence(&normalize_phrase(&m.snippet), term));
+            let snippet_score = if purely_embedded {
                 if profile.identifier_like { 0.04 } else { 0.03 }
             } else if profile.identifier_like {
                 0.09
@@ -568,6 +577,19 @@ fn filename_shape_boost(
 
 fn token_matches_term(term: &str, token: &str) -> bool {
     term == token || singularize_token(term) == token || singularize_token(token) == term
+}
+
+/// Returns true when `needle` appears in `haystack` bounded on both sides by
+/// a non-alphanumeric character (or a string edge).  Covers command names,
+/// path segments, method calls, quoted tokens, and space-separated words —
+/// anything that is a discrete unit rather than a fragment of a longer word.
+fn is_bounded_occurrence(haystack: &str, needle: &str) -> bool {
+    haystack.match_indices(needle).any(|(i, _)| {
+        let before = haystack[..i].chars().next_back();
+        let after = haystack[i + needle.len()..].chars().next();
+        before.map_or(true, |c| !c.is_alphanumeric())
+            && after.map_or(true, |c| !c.is_alphanumeric())
+    })
 }
 
 fn singularize_token(token: &str) -> String {
