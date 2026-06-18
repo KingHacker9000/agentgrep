@@ -381,24 +381,27 @@ Exit criteria:
 
 ## Milestone 8 — Optional hybrid semantic mode behind a flag
 
-Status: in progress — CLI flags added; provider not yet configured.
+Status: **complete** (experimental, opt-in).
 
-Completed so far:
+Completed:
 
-- `agentgrep find --semantic` and `agentgrep index --semantic` flags added.
-- Passing `--semantic` with no provider configured returns a clear actionable error.
-- `coverage.semantic_status` field added to `find --json` output (value: `"not_requested"` until a provider is active).
-- `src/semantic.rs` module boundary created: availability check, error surface, future storage path notes.
-- `docs/JSON_CONTRACT.md` documents `--semantic` behavior and future `semantic_match` evidence type.
-- Default deterministic behavior is unchanged. All existing tests pass.
-
-Remaining for full implementation:
-
-- Bundle or configure a local embedding provider (no cloud APIs, no GPU required).
-- Implement `agentgrep index --semantic` to generate and store embedding vectors alongside `index.json`.
-- Implement `agentgrep find --semantic` to expand candidates using semantic similarity, labeled separately from deterministic evidence.
-- Set `coverage.semantic_status = "active"` and add `"semantic_match"` evidence entries.
-- Measure Mode D against Mode C baseline in `docs/evaluation/`.
+- `agentgrep index --semantic` builds file-level embeddings using **fastembed** (BAAI/bge-small-en-v1.5, 384 dims, CPU-only).
+- `agentgrep index --semantic --yes` accepts the model download non-interactively (for CI/scripts).
+- `agentgrep find "query" --semantic` embeds the query, runs brute-force cosine search over the stored vectors, merges semantic candidates with deterministic candidates, and labels each semantic match with `"semantic_match"` evidence.
+- `coverage.semantic_status` is `"active"` when semantic was used, `"not_requested"` otherwise.
+- Deterministic evidence (rg + BM25 + graph) is always ranked above semantic evidence.
+- Model is cached globally per platform; semantic index is stored repo-locally under `.git/agentgrep/semantic/` (or `.agentgrep/semantic/` for non-git repos).
+- First download prompts for user consent unless `--yes` is passed or a TTY is unavailable.
+- `docs/SEMANTIC.md` documents the full semantic workflow.
+- `docs/JSON_CONTRACT.md` updated.
+- `docs/evaluation/README.md` Mode D updated to reflect active status.
+- `docs/dev/SEMANTIC.md` documents dependency impact, binary size, timing, and upgrade path.
+- `agentgrep semantic status` — inspect the repo semantic index and global model cache.
+- `agentgrep semantic clean --repo-index / --model / --all` — remove semantic data without shell commands.
+- Schema version, model name, and dimensions are checked on load; incompatible indexes fail with a clear message.
+- For identifier-like queries (CamelCase, snake_case), semantic results annotate only — no score boost and no semantic-only candidates — so deterministic ranking is preserved.
+- Resource safety: warn at 5 000 files, hard cap at 50 000 files to bound memory.
+- All existing tests pass. Default behavior is unchanged.
 
 Shape (canonical, now matching existing flags):
 

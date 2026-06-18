@@ -87,30 +87,37 @@ What it adds over Mode B:
 
 ---
 
-### Mode D — agentgrep, indexed + semantic (flags exist; provider not yet configured)
+### Mode D — agentgrep, indexed + semantic (active, experimental)
 
-**Semantic retrieval is not yet active. Do not present as available or benchmarked.**
-
-The CLI flags exist and are accepted:
+Semantic retrieval is **active** behind the `--semantic` flag. Provider: fastembed, model BAAI/bge-small-en-v1.5.
 
 ```bash
+# Build semantic index (prompts for ~130 MB model download on first run)
 agentgrep index --semantic
+# or: agentgrep index --semantic --yes   (non-interactive)
+
+# Semantic-expanded find
 agentgrep find --semantic "where is auth state restored"
+agentgrep find --semantic "SearchResult" --json
 ```
 
-Current behavior: both commands return a clear error explaining that no local embedding
-provider is configured. No silent fallback to deterministic mode.
+What it adds over Mode C:
 
-Rules when a provider is eventually configured:
+- query is embedded and compared against pre-computed file vectors;
+- semantic candidates are merged with deterministic candidates and labeled with `"semantic_match"` evidence;
+- `coverage.semantic_status` is `"active"` when semantic contributed;
+- deterministic evidence still dominates ranking.
 
-- disabled by default;
-- explicit flag required;
-- local-only embeddings;
-- no always-running model;
+Rules (unchanged from design):
+
+- disabled by default (explicit `--semantic` required);
+- local-only embeddings (no cloud API);
+- no always-running model or daemon;
 - no GPU required;
-- semantic evidence labeled separately (`"semantic_match"` in candidate evidence);
-- `coverage.semantic_status` changes from `"not_requested"` to `"active"`;
+- semantic evidence labeled separately from deterministic evidence;
 - default deterministic behavior unchanged.
+
+**No formal evaluation results yet.** Mode D is experimental. Measure it against Mode C before drawing conclusions. See `docs/SEMANTIC.md` for limitations.
 
 ---
 
@@ -130,9 +137,73 @@ These are not current work. Add only if real codebase tests show a specific gap.
 | File | Purpose |
 |---|---|
 | `README.md` | This file — scaffold overview and mode definitions |
+| `BENCHMARKS.md` | Public benchmark philosophy, repo criteria, how to extend and rerun |
+| `METRICS.md` | Metric definitions (automated + manual) and what not to overclaim |
+| `REPORTING.md` | How to generate, share, and extend the static HTML/Markdown report |
+| `TASK_SCHEMA.md` | Repo manifest, task, label, and mode-output schemas |
 | `TASKS.md` | Task categories and example prompts |
-| `METRICS.md` | Metric definitions and what not to overclaim |
-| `RESULT_TEMPLATE.md` | Copy-paste template for recording one evaluation run |
+| `RESULT_TEMPLATE.md` | Copy-paste template for recording one manual evaluation run |
+| `public-repos.jsonl` | Repo manifest (pinned public repos) |
+| `tasks/public-v0.1.jsonl` | Public task set |
+| `labels/public-v0.1.jsonl` | Relevance labels for the public task set |
+
+The runnable harness lives in `scripts/`:
+
+| Script | Purpose |
+|---|---|
+| `scripts/run-eval.ps1` | Clone pinned repos, run Modes A–D, capture raw output + latency |
+| `scripts/analyze-eval.py` | Compute metrics, write `summary.csv` / `summary.json` |
+| `scripts/render-eval-report.py` | Generate static HTML + Markdown report from eval outputs |
+
+---
+
+## Public benchmark workflow (automated)
+
+The automated benchmark runs the four modes against pinned public repos and
+labeled tasks, then computes the retrieval and semantic metrics. This is the
+path that produces reportable numbers. The manual session below is for
+qualitative review.
+
+```powershell
+# 1. (Optional) validate task/label data first.
+python scripts/analyze-eval.py --validate `
+  --tasks docs/evaluation/tasks/public-v0.1.jsonl `
+  --labels docs/evaluation/labels/public-v0.1.jsonl
+
+# 2. Run Modes A, B, C (and D only with -EnableSemantic).
+powershell -ExecutionPolicy Bypass -File scripts/run-eval.ps1 `
+  -RepoManifest docs/evaluation/public-repos.jsonl `
+  -TaskFile     docs/evaluation/tasks/public-v0.1.jsonl `
+  -LabelFile    docs/evaluation/labels/public-v0.1.jsonl `
+  -OutDir       eval-results
+
+# 3. Compute metrics for the run that just completed.
+python scripts/analyze-eval.py `
+  --run-dir eval-results/<run-id> `
+  --labels  docs/evaluation/labels/public-v0.1.jsonl
+
+# 4. Generate the static HTML + Markdown report.
+python scripts/render-eval-report.py `
+  --run-dir eval-results/<run-id> `
+  --labels  docs/evaluation/labels/public-v0.1.jsonl
+# Open eval-results/<run-id>/report/index.html in a browser.
+```
+
+`run-eval.ps1 -Help` prints full options. Mode D is skipped unless
+`-EnableSemantic` is passed and a semantic index can be built.
+
+Outputs land under `eval-results/<run-id>/`: `raw/` (full stdout/stderr per
+run), `parsed/results.jsonl`, `run-meta.json`, and `summary.{csv,json}`.
+The report generator adds `report/index.html`, `report/report.md`, and
+`report/assets/*.svg`. `eval-worktree/` and `eval-results/` are git-ignored.
+
+See [BENCHMARKS.md](./BENCHMARKS.md) for philosophy and how to add a repo/task/
+label, [TASK_SCHEMA.md](./TASK_SCHEMA.md) for the data formats, and
+[METRICS.md](./METRICS.md) for metric definitions.
+
+> **Agentic workflow evaluation is later work.** This benchmark measures
+> *retrieval* — ranked file lists per mode. It does not measure multi-step agent
+> loops, edit success, or end-to-end task completion. That is out of scope here.
 
 ---
 
