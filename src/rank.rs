@@ -136,13 +136,29 @@ pub fn rank_with_index(
 
     finalized.sort_by(|left, right| {
         right
+            .0
             .score
-            .partial_cmp(&left.score)
+            .partial_cmp(&left.0.score)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| left.path.cmp(&right.path))
+            .then_with(|| {
+                // Only use raw_score to break ties when both candidates are at the
+                // 1.0 cap (no index tier boost pushed them higher). When tier boosts
+                // have lifted scores above 1.0, the index already expressed the
+                // preference; fall back to alphabetical so filename-shape signals
+                // that determined the tier continue to dominate.
+                if left.0.score <= 1.0 && right.0.score <= 1.0 {
+                    right
+                        .1
+                        .partial_cmp(&left.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .then_with(|| left.0.path.cmp(&right.0.path))
     });
 
-    finalized.into_iter().take(CANDIDATE_LIMIT).collect()
+    finalized.into_iter().map(|(c, _)| c).take(CANDIDATE_LIMIT).collect()
 }
 
 pub fn next_actions(_query: &str, candidates: &[FileCandidate], repo_root: &str) -> Vec<String> {
@@ -368,6 +384,7 @@ fn build_candidate(
         score = score.min(0.30);
     }
 
+    let raw_score = score;
     let score = round_score(score.clamp(0.0, 1.0));
     let confidence = confidence_for(
         &role,
@@ -391,6 +408,7 @@ fn build_candidate(
         },
         tier: index_tier,
         matched_terms: matched_terms.len(),
+        raw_score,
     }
 }
 
@@ -440,9 +458,20 @@ fn collect_token_matches(
         }
 
         if snippet_hit {
+            // Short terms (≤3 chars) in multi-word queries are prone to spurious
+            // substring matches (e.g. "on" in "configuration", "rg" in "agentgrep").
+            // Reduce their per-snippet weight to prevent noisy common-term doc inflation.
+            let short_in_multi = profile.terms.len() >= 3 && term.len() <= 3;
+            let snippet_score = if short_in_multi {
+                if profile.identifier_like { 0.04 } else { 0.03 }
+            } else if profile.identifier_like {
+                0.09
+            } else {
+                0.05
+            };
             results.push(TokenMatch {
                 term: term.clone(),
-                score: if profile.identifier_like { 0.09 } else { 0.05 },
+                score: snippet_score,
                 evidence: Some(Evidence {
                     evidence_type: "snippet_term_match".to_string(),
                     detail: format!("matched '{term}' in snippet"),
@@ -1163,9 +1192,10 @@ struct RankedCandidate {
     candidate: FileCandidate,
     tier: usize,
     matched_terms: usize,
+    raw_score: f64,
 }
 
-fn finalize_ranked_candidate(mut ranked: RankedCandidate) -> FileCandidate {
+fn finalize_ranked_candidate(mut ranked: RankedCandidate) -> (FileCandidate, f64) {
     let tier = ranked.tier;
     let has_index_definition = ranked
         .candidate
@@ -1197,7 +1227,7 @@ fn finalize_ranked_candidate(mut ranked: RankedCandidate) -> FileCandidate {
         };
     }
 
-    ranked.candidate
+    (ranked.candidate, ranked.raw_score)
 }
 
 fn index_confidence_priority(confidence: Confidence) -> usize {
