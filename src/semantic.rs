@@ -545,6 +545,68 @@ pub fn is_identifier_like(query: &str) -> bool {
     has_camel || has_snake
 }
 
+/// Returns true when a candidate qualifies as a protected deterministic anchor
+/// that semantic scores must not displace.
+///
+/// A protected anchor is a **source or config** file whose exact query phrase
+/// was found in its content (`exact_phrase_match` evidence), and that is not
+/// flagged as fixture-like.  Such candidates represent strong, direct lexical
+/// evidence that the query targets a specific string (e.g. an error message or
+/// API constant) rather than a conceptual topic.
+fn is_strong_anchor(candidate: &FileCandidate) -> bool {
+    let has_exact = candidate
+        .evidence
+        .iter()
+        .any(|e| e.evidence_type == "exact_phrase_match");
+    let is_source_or_config = matches!(candidate.role.as_str(), "source" | "config");
+    let not_fixture = !candidate
+        .evidence
+        .iter()
+        .any(|e| e.evidence_type == "fixture_like_match");
+    has_exact && is_source_or_config && not_fixture
+}
+
+/// After semantic re-ranking, prevent semantically-boosted candidates from
+/// displacing strong deterministic anchors.
+///
+/// If any candidate qualifies as a protected anchor (exact phrase in a
+/// source/config file, not a fixture), every other candidate that is *not*
+/// itself a protected anchor is capped so its score stays strictly below the
+/// best anchor score.
+///
+/// Conceptual queries — where no source/config file contains the verbatim
+/// query phrase — produce no anchor, so `best_anchor_score` stays `-inf` and
+/// this function returns without changing any scores.  Semantic wins for
+/// those queries are fully preserved.
+fn apply_semantic_anchor_guard(candidates: &mut Vec<FileCandidate>) {
+    let best_anchor_score = candidates
+        .iter()
+        .filter(|c| is_strong_anchor(c))
+        .map(|c| c.score)
+        .fold(f64::NEG_INFINITY, f64::max);
+
+    if !best_anchor_score.is_finite() {
+        return;
+    }
+
+    let mut changed = false;
+    for c in candidates.iter_mut() {
+        if !is_strong_anchor(c) && c.score >= best_anchor_score - 1e-9 {
+            c.score = (best_anchor_score - 0.01).max(0.0);
+            changed = true;
+        }
+    }
+
+    if changed {
+        candidates.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.path.cmp(&b.path))
+        });
+    }
+}
+
 /// Load model + semantic index, embed the query, run cosine search, and merge
 /// semantic candidates with the deterministic candidates already ranked by
 /// `rank::rank_with_index`.
@@ -645,6 +707,12 @@ pub fn expand_candidates(
             .then_with(|| a.path.cmp(&b.path))
     });
     det_candidates.truncate(crate::rank::CANDIDATE_LIMIT);
+
+    // Identifier queries are annotation-only (no score changes happen above),
+    // so the anchor guard is irrelevant and skipped for them.
+    if !identifier_query {
+        apply_semantic_anchor_guard(&mut det_candidates);
+    }
 
     Ok((det_candidates, "active".to_string()))
 }
@@ -917,6 +985,177 @@ mod tests {
         let got = read_vectors(&path).expect("read failed");
         assert!(got.is_empty());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn semantic_anchor_guard_caps_doc_below_source_anchor() {
+        // Scenario: source file has exact_phrase_match; doc file outranked it
+        // after semantic boosting (near_phrase only, no exact phrase).
+        // The guard must restore the source file to the top position.
+        let source = FileCandidate {
+            path: "crates/core/search.rs".to_string(),
+            kind: "file".to_string(),
+            role: "source".to_string(),
+            score: 0.75,
+            confidence: Confidence::High,
+            line_ranges: vec![],
+            snippets: vec![],
+            evidence: vec![
+                Evidence {
+                    evidence_type: "exact_phrase_match".to_string(),
+                    detail: "matched exact phrase in lines 310-310".to_string(),
+                },
+                Evidence {
+                    evidence_type: "rg_match".to_string(),
+                    detail: "matched on lines 310".to_string(),
+                },
+                Evidence {
+                    evidence_type: "source_role".to_string(),
+                    detail: "path suggests source-like file role".to_string(),
+                },
+            ],
+        };
+        let guide = FileCandidate {
+            path: "GUIDE.md".to_string(),
+            kind: "file".to_string(),
+            role: "doc".to_string(),
+            score: 0.90,
+            confidence: Confidence::Medium,
+            line_ranges: vec![],
+            snippets: vec![],
+            evidence: vec![
+                Evidence {
+                    evidence_type: "near_phrase_match".to_string(),
+                    detail: "2 query terms clustered in lines 148-149".to_string(),
+                },
+                Evidence {
+                    evidence_type: "semantic_match".to_string(),
+                    detail: "cosine 0.850 (BAAI/bge-small-en-v1.5)".to_string(),
+                },
+            ],
+        };
+
+        let mut candidates = vec![guide, source];
+        apply_semantic_anchor_guard(&mut candidates);
+
+        assert_eq!(
+            candidates[0].path, "crates/core/search.rs",
+            "source with exact_phrase_match must rank first"
+        );
+        assert_eq!(candidates[1].path, "GUIDE.md");
+        assert!(
+            candidates[0].score > candidates[1].score,
+            "source score must exceed guide score after capping"
+        );
+    }
+
+    #[test]
+    fn semantic_anchor_guard_no_op_without_exact_phrase_anchor() {
+        // Conceptual query: no source/config file has exact_phrase_match.
+        // Semantic win for a doc file must be preserved unchanged.
+        let doc = FileCandidate {
+            path: "docs/architecture.md".to_string(),
+            kind: "file".to_string(),
+            role: "doc".to_string(),
+            score: 0.90,
+            confidence: Confidence::Medium,
+            line_ranges: vec![],
+            snippets: vec![],
+            evidence: vec![Evidence {
+                evidence_type: "semantic_match".to_string(),
+                detail: "cosine 0.850 (BAAI/bge-small-en-v1.5)".to_string(),
+            }],
+        };
+        let source = FileCandidate {
+            path: "src/rank.rs".to_string(),
+            kind: "file".to_string(),
+            role: "source".to_string(),
+            score: 0.75,
+            confidence: Confidence::Medium,
+            line_ranges: vec![],
+            snippets: vec![],
+            evidence: vec![
+                Evidence {
+                    evidence_type: "near_phrase_match".to_string(),
+                    detail: "terms clustered near line 42".to_string(),
+                },
+                Evidence {
+                    evidence_type: "rg_match".to_string(),
+                    detail: "matched on lines 42".to_string(),
+                },
+            ],
+        };
+
+        let mut candidates = vec![doc, source];
+        apply_semantic_anchor_guard(&mut candidates);
+
+        assert_eq!(
+            candidates[0].path, "docs/architecture.md",
+            "doc semantic win must be preserved when no exact phrase anchor exists"
+        );
+        assert_eq!(candidates[1].path, "src/rank.rs");
+        assert!(
+            (candidates[0].score - 0.90).abs() < 1e-9,
+            "doc score must be unchanged"
+        );
+    }
+
+    #[test]
+    fn semantic_anchor_guard_caps_doc_that_ties_anchor_score() {
+        // Reproduces the ripgrep-err-002 failure mode: the doc file ties the
+        // anchor's score exactly (both capped to 1.0 by the scoring pipeline),
+        // so a strict `>` comparison would leave it uncapped.
+        let source = FileCandidate {
+            path: "crates/core/search.rs".to_string(),
+            kind: "file".to_string(),
+            role: "source".to_string(),
+            score: 1.0,
+            confidence: Confidence::High,
+            line_ranges: vec![],
+            snippets: vec![],
+            evidence: vec![
+                Evidence {
+                    evidence_type: "exact_phrase_match".to_string(),
+                    detail: "matched exact phrase in lines 310-310".to_string(),
+                },
+                Evidence {
+                    evidence_type: "source_role".to_string(),
+                    detail: "path suggests source-like file role".to_string(),
+                },
+            ],
+        };
+        let guide = FileCandidate {
+            path: "GUIDE.md".to_string(),
+            kind: "file".to_string(),
+            role: "doc".to_string(),
+            score: 1.0,
+            confidence: Confidence::Medium,
+            line_ranges: vec![],
+            snippets: vec![],
+            evidence: vec![
+                Evidence {
+                    evidence_type: "near_phrase_match".to_string(),
+                    detail: "2 query terms clustered in lines 148-149".to_string(),
+                },
+                Evidence {
+                    evidence_type: "semantic_match".to_string(),
+                    detail: "cosine 0.850 (BAAI/bge-small-en-v1.5)".to_string(),
+                },
+            ],
+        };
+
+        // GUIDE.md sorts first alphabetically at equal scores; guard must fix this.
+        let mut candidates = vec![guide, source];
+        apply_semantic_anchor_guard(&mut candidates);
+
+        assert_eq!(
+            candidates[0].path, "crates/core/search.rs",
+            "source must rank first even when scores tie"
+        );
+        assert!(
+            candidates[0].score > candidates[1].score,
+            "guide score must be capped below anchor score"
+        );
     }
 
     fn temp_dir_for_test() -> PathBuf {
