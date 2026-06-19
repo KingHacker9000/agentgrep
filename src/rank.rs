@@ -145,6 +145,43 @@ pub fn rank_with_index(
         .map(finalize_ranked_candidate)
         .collect::<Vec<_>>();
 
+    // Exact-phrase anchor protection: when a source/config file has an exact phrase
+    // match in its content and no indexed-symbol boost (its high rank is purely from
+    // lexical evidence), it must not be pushed out of the results by files that ranked
+    // higher only because of index tier boosts.  Cap every competitor that lacks its
+    // own exact-phrase evidence to just below the anchor's score.
+    //
+    // Applies for all query types when an index is active.  Files that carry their own
+    // exact_phrase_match evidence are never capped — they earned their rank lexically.
+    if index.is_some() {
+        let best_exact_anchor_score = finalized
+            .iter()
+            .filter(|(c, raw)| {
+                is_lexical_anchor(c, *raw)
+                    && c.evidence
+                        .iter()
+                        .any(|e| e.evidence_type == "exact_phrase_match")
+            })
+            .map(|(c, _)| c.score)
+            .fold(f64::NEG_INFINITY, f64::max);
+
+        if best_exact_anchor_score.is_finite() {
+            for (c, raw) in finalized.iter_mut() {
+                let is_exact_anchor = is_lexical_anchor(c, *raw)
+                    && c.evidence
+                        .iter()
+                        .any(|e| e.evidence_type == "exact_phrase_match");
+                let has_own_exact_phrase = c
+                    .evidence
+                    .iter()
+                    .any(|e| e.evidence_type == "exact_phrase_match");
+                if !is_exact_anchor && !has_own_exact_phrase && c.score > best_exact_anchor_score {
+                    c.score = round_score(best_exact_anchor_score - 0.01);
+                }
+            }
+        }
+    }
+
     finalized.sort_by(|left, right| {
         right
             .0
@@ -152,19 +189,20 @@ pub fn rank_with_index(
             .partial_cmp(&left.0.score)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| {
-                // Only use raw_score to break ties when both candidates are at the
-                // 1.0 cap (no index tier boost pushed them higher). When tier boosts
-                // have lifted scores above 1.0, the index already expressed the
-                // preference; fall back to alphabetical so filename-shape signals
-                // that determined the tier continue to dominate.
-                if left.0.score <= 1.0 && right.0.score <= 1.0 {
-                    right
-                        .1
-                        .partial_cmp(&left.1)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                } else {
-                    std::cmp::Ordering::Equal
-                }
+                // Candidates whose tier came from filename/path shape evidence earned
+                // it lexically; give them priority over candidates boosted solely by
+                // index symbol definitions at the same score level.
+                let left_shape = has_shape_tier_evidence(&left.0) as u8;
+                let right_shape = has_shape_tier_evidence(&right.0) as u8;
+                right_shape.cmp(&left_shape)
+            })
+            .then_with(|| {
+                // Among candidates with the same score and shape tier origin, prefer
+                // stronger phrase/lexical evidence (higher raw score).
+                right
+                    .1
+                    .partial_cmp(&left.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
             .then_with(|| left.0.path.cmp(&right.0.path))
     });
@@ -1269,6 +1307,69 @@ fn finalize_ranked_candidate(mut ranked: RankedCandidate) -> (FileCandidate, f64
     }
 
     (ranked.candidate, ranked.raw_score)
+}
+
+/// Returns true when the candidate has filename or path shape evidence, meaning
+/// its high tier came from lexical filename matching rather than from index symbol
+/// definitions alone.  Used to give filename-matched candidates priority over pure
+/// symbol-hub files at the same score level.
+fn has_shape_tier_evidence(candidate: &FileCandidate) -> bool {
+    candidate.evidence.iter().any(|e| {
+        matches!(
+            e.evidence_type.as_str(),
+            "filename_shape_match" | "path_shape_match"
+        )
+    })
+}
+
+/// Returns true when a candidate is a strong pure-lexical anchor that should
+/// not be displaced by index tier boosts.
+///
+/// Qualifying conditions (all must hold):
+/// - Phrase evidence (exact or high-confidence near phrase in source/config)
+/// - Source or config role
+/// - Not fixture-like
+/// - No indexed evidence (the candidate's score is driven by lexical signals only)
+/// - Raw score above the phrase-strength threshold
+///
+/// Because near-phrase is weaker evidence than exact-phrase, it requires a
+/// higher raw-score bar to qualify.
+fn is_lexical_anchor(candidate: &FileCandidate, raw_score: f64) -> bool {
+    let has_exact = candidate
+        .evidence
+        .iter()
+        .any(|e| e.evidence_type == "exact_phrase_match");
+    let has_near = candidate
+        .evidence
+        .iter()
+        .any(|e| e.evidence_type == "near_phrase_match");
+    let not_fixture = !candidate
+        .evidence
+        .iter()
+        .any(|e| e.evidence_type == "fixture_like_match");
+    let is_source_or_config = matches!(candidate.role.as_str(), "source" | "config");
+    // Files that received indexed_symbol_definition or indexed_symbol_reference
+    // boosts already had their rank corrected by the symbol index; they are not
+    // pure lexical anchors.  indexed_edge signals are structural and weaker —
+    // a file can still qualify as an anchor even if it carries edge evidence.
+    let has_symbol_index = candidate.evidence.iter().any(|e| {
+        matches!(
+            e.evidence_type.as_str(),
+            "indexed_symbol_definition" | "indexed_symbol_reference"
+        )
+    });
+
+    if !not_fixture || !is_source_or_config || has_symbol_index {
+        return false;
+    }
+
+    // Exact phrase in source/config with no index boost is a strong anchor.
+    if has_exact && raw_score >= 0.50 {
+        return true;
+    }
+
+    // Near phrase requires a higher raw-score threshold — it is weaker evidence.
+    has_near && raw_score >= 0.80
 }
 
 fn index_confidence_priority(confidence: Confidence) -> usize {
