@@ -1,6 +1,6 @@
 # Agentgrep Roadmap
 
-## Current milestone: Comparative evaluation scaffold
+## Current milestone: Dogfood on real repos
 
 - [x] MVP core command loop
 - [x] Release hardening
@@ -8,10 +8,10 @@
 - [x] Retrieval v2: BM25-style lexical ranking, identifier expansion, graph boosts
 - [x] Tree-sitter multi-language indexing (Rust, Python, JS, TS, Go)
 - [x] Packaging / integrations
-- [x] Comparative evaluation scaffold (current milestone)
-- [ ] Dogfood on real repos
+- [x] Comparative evaluation scaffold
+- [x] Optional semantic mode behind a flag (experimental, opt-in)
+- [ ] Dogfood on real repos (current milestone)
 - [ ] Config file
-- [ ] Optional hybrid semantic mode behind a flag
 
 ## Current status
 
@@ -187,7 +187,7 @@ Exit state:
 
 ## Milestone 3.5 — Comparative evaluation scaffold
 
-Status: current.
+Status: complete.
 
 Goal:
 
@@ -468,7 +468,7 @@ Exit criteria:
 
 ## Milestone 10 — Packaging / integrations
 
-Status: current.
+Status: complete.
 
 Goal:
 

@@ -45,10 +45,11 @@ This document covers how to bump, build, verify, and ship a release of Agentgrep
 Run in order. All must pass.
 
 ```bash
-cargo fmt
-cargo check
-cargo test
+cargo fmt --all -- --check
+cargo check --all-targets
+cargo test --all-targets
 powershell -ExecutionPolicy Bypass -File scripts/smoke.ps1
+cargo run -- --version
 ```
 
 Then run the install verification script:
