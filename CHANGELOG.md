@@ -2,6 +2,28 @@
 
 All notable changes to Agentgrep are documented here.
 
+## [0.2.0] — 2026-06-19
+
+### What is in this release
+
+**Retrieval ranking improvements (Mode B/C/D)**
+Mode B `find` now uses a `raw_score` tiebreaker and a word-boundary short-term snippet discount, raising Hit@1 on the public benchmark. Mode C/D gain confidence-aware score fusion that weights BM25 and graph evidence against the per-candidate confidence score before merging semantic candidates.
+
+**Semantic anchor guard**
+Exact phrase queries and symbol-like identifiers (CamelCase, `snake_case`) now protect their deterministic top candidates from being displaced by semantic reranking. Semantic evidence annotates but cannot outrank a direct textual hit.
+
+**Evaluation infrastructure**
+- `tasks/public-v0.1.jsonl` (14 tasks) is the frozen gated baseline; `scripts/check-eval-gates.py` enforces regression thresholds.
+- `tasks/public-v0.2.jsonl` (26 tasks) is a diagnostic expansion adding harder symbol-tracing, refactor-prep, impact-check, and workflow queries.
+- `tasks/public-v0.3-validation.jsonl` (14 tasks) covers `sharkdp/fd` — an unseen repo for learning and tuning without gate enforcement.
+- `tasks/public-holdout-v0.1.jsonl` (12 tasks) covers `sharkdp/bat` — frozen aggregate-only holdout for generalization checks.
+- `scripts/run-eval.ps1`, `analyze-eval.py`, `render-eval-report.py`, and `check-eval-gates.py` form the runnable evaluation harness.
+
+**Ranking diagnostics**
+`analyze-eval.py` now emits per-mode, per-task win/miss/regression tables alongside the aggregate `summary.csv` / `summary.json`.
+
+---
+
 ## [0.1.2] — 2026-06-17
 
 First public release.

@@ -147,17 +147,18 @@ The index is stored locally in the repo's git area when available, otherwise in 
 
 ## Roadmap
 
-Current work stays focused on the deterministic local radar:
+The v0.1-style deterministic core is complete. Active development is on evaluation infrastructure and reliability improvements.
 
-- better `find` ranking and evidence;
-- optional lightweight indexing;
-- file maps;
-- symbol awareness;
-- related-file and blast-radius heuristics;
-- test recommendations;
-- only then, optional semantic or hybrid retrieval as an explicit opt-in.
+Completed work:
 
-Semantic or hybrid retrieval is future work only. It should remain optional and local-first if it is added at all.
+- core command loop (`find`, `index`, `map`, `symbol`, `related`, `blast`);
+- retrieval v2: BM25-style lexical ranking, identifier expansion, graph boosts;
+- confidence-aware fusion for Mode C/D ranking;
+- Tree-sitter multi-language indexing (Rust, Python, JS/TS, Go);
+- comparative evaluation scaffold with labeled task sets and regression gates;
+- optional semantic mode (`--semantic`) via fastembed — disabled by default, local-only.
+
+Next: dogfood on real repos, config file.
 
 ## What Agentgrep is and is not
 
@@ -210,10 +211,13 @@ See also: [docs/AGENTS.md](./docs/AGENTS.md) for the full command reference.
 Before a release, run:
 
 ```bash
-cargo fmt
-cargo check
-cargo test
+cargo fmt --all -- --check
+cargo check --all-targets
+cargo test --all-targets
 powershell -ExecutionPolicy Bypass -File scripts/smoke.ps1
+cargo run -- --version
 ```
 
 If you need to inspect long help or report output, capture it into `manual-test/`.
+
+See [docs/RELEASE.md](./docs/RELEASE.md) for the full release procedure.
