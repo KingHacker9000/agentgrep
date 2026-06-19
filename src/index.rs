@@ -2264,10 +2264,19 @@ fn collect_files(
         });
 
         if crate::parser::language::detect_language(&relative_path).is_some() {
-            let contents = fs::read_to_string(path)
-                .with_context(|| format!("failed to read source file {}", display_path(path)))?;
-            source_texts.insert(relative_path.clone(), contents.clone());
-            lex_texts.insert(relative_path, contents);
+            match fs::read_to_string(path) {
+                Ok(contents) => {
+                    source_texts.insert(relative_path.clone(), contents.clone());
+                    lex_texts.insert(relative_path, contents);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "warning: skipping source file with unreadable content ({}): {}",
+                        display_path(path),
+                        e
+                    );
+                }
+            }
         } else if metadata.len() <= LEX_READ_SIZE_LIMIT {
             if let Ok(contents) = fs::read_to_string(path) {
                 lex_texts.insert(relative_path, contents);

@@ -149,6 +149,82 @@ workflow queries). This version is **diagnostic only**: no gates are enforced
 against it yet. Use it to observe where the current modes fall short before
 deciding on new gate thresholds.
 
+### public-v0.3-validation — unseen-repo validation (14 labeled tasks)
+
+`tasks/public-v0.3-validation.jsonl` and `labels/public-v0.3-validation.jsonl`
+cover **`sharkdp/fd`** (v10.2.0, commit `b19136871310b01500b4f09eadd7387b8476be47`),
+a repo not used in any prior benchmark set.
+
+**Policy:** this set is for learning and tuning.
+
+- You **may** run it frequently as part of development.
+- You **may** inspect per-task failures and use them to understand where the
+  system falls short.
+- You **may** improve the system based on what you observe here.
+- Do **not** retune by editing labels to match agentgrep output. Factual label
+  corrections are allowed but must be documented in a commit message.
+- No regression gates are enforced against this set.
+
+**Run command:**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run-eval.ps1 `
+  -TaskFile     docs/evaluation/tasks/public-v0.3-validation.jsonl `
+  -LabelFile    docs/evaluation/labels/public-v0.3-validation.jsonl `
+  -AgentgrepBin .\target\release\agentgrep.exe `
+  -OnlyLabeled `
+  -EnableSemantic
+```
+
+### public-holdout-v0.1 — frozen aggregate-only holdout (12 labeled tasks)
+
+`tasks/public-holdout-v0.1.jsonl` and `labels/public-holdout-v0.1.jsonl`
+cover **`sharkdp/bat`** (v0.25.0, commit `25f4f96ea3afb6fe44552f3b38ed8b1540ffa1b3`),
+a repo not used in any prior benchmark set.
+
+**Policy:** this set is a frozen signal of generalization. Treat it as a
+one-way mirror — you can see the aggregate number, but not the per-task detail.
+
+- Run it **infrequently** (e.g. before a release, or after a major ranking
+  change).
+- Read only `summary.json` / `summary.csv` (aggregate metrics grouped by mode,
+  repo, and task type).
+- Do **not** run `render-eval-report.py` against holdout results — it generates
+  per-task win/miss/regression tables that violate the policy.
+- Do **not** open `eval-results/<run-id>/raw/` for holdout runs.
+- Do **not** tune the system to fix specific holdout failures. If you see a
+  holdout regression, understand it via the validation set or by inspecting the
+  system in isolation.
+- Do **not** edit holdout labels. The only permitted change is a factual
+  correction documented in a commit message with the label `[label-correction]`.
+- No regression gates are enforced against this set.
+
+**Run command:**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run-eval.ps1 `
+  -TaskFile     docs/evaluation/tasks/public-holdout-v0.1.jsonl `
+  -LabelFile    docs/evaluation/labels/public-holdout-v0.1.jsonl `
+  -AgentgrepBin .\target\release\agentgrep.exe `
+  -OnlyLabeled `
+  -EnableSemantic
+```
+
+After the run, read only the aggregate summary — do **not** inspect per-task raw outputs:
+
+```powershell
+python scripts/analyze-eval.py `
+  --run-dir eval-results/<run-id> `
+  --labels  docs/evaluation/labels/public-holdout-v0.1.jsonl
+# Review eval-results/<run-id>/summary.json — aggregate only.
+```
+
+> **Why the separation?** The validation set lets you inspect failures and learn
+> from them — that is its purpose. The holdout set measures how well your
+> improvements generalize to a completely unseen repo. If you tune against
+> holdout failures, the holdout number stops being a generalization estimate and
+> becomes another training signal.
+
 ---
 
 ## Contents of this folder
@@ -167,6 +243,10 @@ deciding on new gate thresholds.
 | `labels/public-v0.1.jsonl` | Relevance labels for the public task set — **frozen** |
 | `tasks/public-v0.2.jsonl` | Expanded task set — 26 labeled tasks, diagnostic only |
 | `labels/public-v0.2.jsonl` | Relevance labels for the expanded task set |
+| `tasks/public-v0.3-validation.jsonl` | Validation set — 14 labeled tasks on fd (unseen repo, inspect-ok) |
+| `labels/public-v0.3-validation.jsonl` | Relevance labels for the validation set |
+| `tasks/public-holdout-v0.1.jsonl` | Holdout set — 12 labeled tasks on bat (aggregate only, do not tune from) |
+| `labels/public-holdout-v0.1.jsonl` | Relevance labels for the holdout set |
 
 The runnable harness lives in `scripts/`:
 
@@ -193,12 +273,15 @@ python scripts/analyze-eval.py --validate `
   --tasks docs/evaluation/tasks/public-v0.1.jsonl `
   --labels docs/evaluation/labels/public-v0.1.jsonl
 
-# 2. Run Modes A, B, C (and D only with -EnableSemantic).
+# 2. Run Modes A–D against the gated task set.
 powershell -ExecutionPolicy Bypass -File scripts/run-eval.ps1 `
-  -RepoManifest docs/evaluation/public-repos.jsonl `
-  -TaskFile     docs/evaluation/tasks/public-v0.1.jsonl `
-  -LabelFile    docs/evaluation/labels/public-v0.1.jsonl `
-  -OutDir       eval-results
+  -RepoManifest  docs/evaluation/public-repos.jsonl `
+  -TaskFile      docs/evaluation/tasks/public-v0.1.jsonl `
+  -LabelFile     docs/evaluation/labels/public-v0.1.jsonl `
+  -AgentgrepBin  .\target\release\agentgrep.exe `
+  -OutDir        eval-results `
+  -OnlyLabeled `
+  -EnableSemantic
 
 # 3. Compute metrics for the run that just completed.
 python scripts/analyze-eval.py `
