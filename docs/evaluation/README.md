@@ -154,6 +154,7 @@ The runnable harness lives in `scripts/`:
 | `scripts/run-eval.ps1` | Clone pinned repos, run Modes A–D, capture raw output + latency |
 | `scripts/analyze-eval.py` | Compute metrics, write `summary.csv` / `summary.json` |
 | `scripts/render-eval-report.py` | Generate static HTML + Markdown report from eval outputs |
+| `scripts/check-eval-gates.py` | Enforce regression thresholds against `summary.json`; exits non-zero on failure |
 
 ---
 
@@ -187,6 +188,9 @@ python scripts/render-eval-report.py `
   --run-dir eval-results/<run-id> `
   --labels  docs/evaluation/labels/public-v0.1.jsonl
 # Open eval-results/<run-id>/report/index.html in a browser.
+
+# 5. Check regression gates (exits non-zero if any threshold is missed).
+python scripts/check-eval-gates.py --run-dir eval-results/<run-id>
 ```
 
 `run-eval.ps1 -Help` prints full options. Mode D is skipped unless
