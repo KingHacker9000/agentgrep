@@ -566,34 +566,83 @@ fn is_strong_anchor(candidate: &FileCandidate) -> bool {
     has_exact && is_source_or_config && not_fixture
 }
 
+/// Returns true when a candidate is a protected index-definition anchor for
+/// the queried symbol.
+///
+/// A strong symbol anchor is a **source or config** file that carries an
+/// `indexed_symbol_definition` evidence entry whose symbol name matches the
+/// query (case-insensitive), and that is not flagged as fixture-like.  Such
+/// candidates represent the authoritative definition site for a named symbol
+/// and must not be displaced by files that only reference, re-export, or are
+/// thematically similar to that symbol.
+fn is_strong_symbol_anchor(candidate: &FileCandidate, query: &str) -> bool {
+    let query_lower = query.to_lowercase();
+    let prefix = "defines symbol ";
+    let has_exact_sym_def = candidate.evidence.iter().any(|e| {
+        e.evidence_type == "indexed_symbol_definition"
+            && e.detail
+                .strip_prefix(prefix)
+                .map(|sym| sym.to_lowercase() == query_lower)
+                .unwrap_or(false)
+    });
+    let is_source_or_config = matches!(candidate.role.as_str(), "source" | "config");
+    let not_fixture = !candidate
+        .evidence
+        .iter()
+        .any(|e| e.evidence_type == "fixture_like_match");
+    has_exact_sym_def && is_source_or_config && not_fixture
+}
+
 /// After semantic re-ranking, prevent semantically-boosted candidates from
 /// displacing strong deterministic anchors.
 ///
-/// If any candidate qualifies as a protected anchor (exact phrase in a
-/// source/config file, not a fixture), every other candidate that is *not*
-/// itself a protected anchor is capped so its score stays strictly below the
-/// best anchor score.
+/// Two independent guards run in sequence:
 ///
-/// Conceptual queries — where no source/config file contains the verbatim
-/// query phrase — produce no anchor, so `best_anchor_score` stays `-inf` and
-/// this function returns without changing any scores.  Semantic wins for
-/// those queries are fully preserved.
-fn apply_semantic_anchor_guard(candidates: &mut Vec<FileCandidate>) {
-    let best_anchor_score = candidates
+/// 1. **Exact-phrase guard** — if any source/config file contains the verbatim
+///    query phrase (`exact_phrase_match`, not fixture-like), every non-phrase-
+///    anchor candidate is capped below the best phrase-anchor score.
+///
+/// 2. **Symbol-definition guard** — if any source/config file holds an
+///    `indexed_symbol_definition` entry whose symbol name matches the query
+///    (not fixture-like), every candidate *without* such a definition is capped
+///    below the best symbol-anchor score.  This prevents the printer-subsystem
+///    halo effect where many files referencing a symbol get a collective
+///    semantic boost that buries the single file that actually defines it.
+///
+/// Either guard fires only when its class of anchor exists; queries that
+/// produce no qualifying anchors (purely conceptual topics with no verbatim
+/// phrase and no exact symbol definition) pass through untouched so semantic
+/// wins are fully preserved.
+fn apply_semantic_anchor_guard(candidates: &mut Vec<FileCandidate>, query: &str) {
+    let best_phrase_anchor_score = candidates
         .iter()
         .filter(|c| is_strong_anchor(c))
         .map(|c| c.score)
         .fold(f64::NEG_INFINITY, f64::max);
 
-    if !best_anchor_score.is_finite() {
-        return;
-    }
+    let best_symbol_anchor_score = candidates
+        .iter()
+        .filter(|c| is_strong_symbol_anchor(c, query))
+        .map(|c| c.score)
+        .fold(f64::NEG_INFINITY, f64::max);
 
     let mut changed = false;
-    for c in candidates.iter_mut() {
-        if !is_strong_anchor(c) && c.score >= best_anchor_score - 1e-9 {
-            c.score = (best_anchor_score - 0.01).max(0.0);
-            changed = true;
+
+    if best_phrase_anchor_score.is_finite() {
+        for c in candidates.iter_mut() {
+            if !is_strong_anchor(c) && c.score >= best_phrase_anchor_score - 1e-9 {
+                c.score = (best_phrase_anchor_score - 0.01).max(0.0);
+                changed = true;
+            }
+        }
+    }
+
+    if best_symbol_anchor_score.is_finite() {
+        for c in candidates.iter_mut() {
+            if !is_strong_symbol_anchor(c, query) && c.score >= best_symbol_anchor_score - 1e-9 {
+                c.score = (best_symbol_anchor_score - 0.01).max(0.0);
+                changed = true;
+            }
         }
     }
 
@@ -711,7 +760,7 @@ pub fn expand_candidates(
     // Identifier queries are annotation-only (no score changes happen above),
     // so the anchor guard is irrelevant and skipped for them.
     if !identifier_query {
-        apply_semantic_anchor_guard(&mut det_candidates);
+        apply_semantic_anchor_guard(&mut det_candidates, query);
     }
 
     Ok((det_candidates, "active".to_string()))
@@ -1036,7 +1085,7 @@ mod tests {
         };
 
         let mut candidates = vec![guide, source];
-        apply_semantic_anchor_guard(&mut candidates);
+        apply_semantic_anchor_guard(&mut candidates, "query");
 
         assert_eq!(
             candidates[0].path, "crates/core/search.rs",
@@ -1087,7 +1136,7 @@ mod tests {
         };
 
         let mut candidates = vec![doc, source];
-        apply_semantic_anchor_guard(&mut candidates);
+        apply_semantic_anchor_guard(&mut candidates, "conceptual query");
 
         assert_eq!(
             candidates[0].path, "docs/architecture.md",
@@ -1146,7 +1195,7 @@ mod tests {
 
         // GUIDE.md sorts first alphabetically at equal scores; guard must fix this.
         let mut candidates = vec![guide, source];
-        apply_semantic_anchor_guard(&mut candidates);
+        apply_semantic_anchor_guard(&mut candidates, "query");
 
         assert_eq!(
             candidates[0].path, "crates/core/search.rs",
