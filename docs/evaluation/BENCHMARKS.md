@@ -133,13 +133,15 @@ are repo-relative — before you spend time on a full run.
 The full loop is two commands: run, then analyze.
 
 ```powershell
-# 1. Run all modes against all repos/tasks. Mode D (semantic) is skipped
-#    unless -EnableSemantic is passed and a semantic index can be built.
+# 1. Run all modes (A–D) against the gated task set.
 powershell -ExecutionPolicy Bypass -File scripts/run-eval.ps1 `
-  -RepoManifest docs/evaluation/public-repos.jsonl `
-  -TaskFile     docs/evaluation/tasks/public-v0.1.jsonl `
-  -LabelFile    docs/evaluation/labels/public-v0.1.jsonl `
-  -OutDir       eval-results
+  -RepoManifest  docs/evaluation/public-repos.jsonl `
+  -TaskFile      docs/evaluation/tasks/public-v0.1.jsonl `
+  -LabelFile     docs/evaluation/labels/public-v0.1.jsonl `
+  -AgentgrepBin  .\target\release\agentgrep.exe `
+  -OutDir        eval-results `
+  -OnlyLabeled `
+  -EnableSemantic
 
 # 2. Compute metrics from the captured run.
 python scripts/analyze-eval.py `
