@@ -28,20 +28,20 @@ GATES = [
         "B hit@1",
         ("by_mode", "B", "hit@1"),
         ">=", 0.70,
-        "Mode B (lexical, no index) must surface the correct file at rank 1 for ≥70 % of tasks",
+        "Mode B (lexical, no index) must surface the correct file at rank 1 for >=70 % of tasks",
     ),
     (
         "B hit@8",
         ("by_mode", "B", "hit@8"),
         ">=", 0.85,
-        "Mode B must surface the correct file within the top-8 results for ≥85 % of tasks",
+        "Mode B must surface the correct file within the top-8 results for >=85 % of tasks",
     ),
     # Mode C
     (
         "C hit@1",
         ("by_mode", "C", "hit@1"),
         ">=", 0.85,
-        "Mode C (indexed fusion) must surface the correct file at rank 1 for ≥85 % of tasks",
+        "Mode C (indexed fusion) must surface the correct file at rank 1 for >=85 % of tasks",
     ),
     (
         "C hit@8",
@@ -54,7 +54,7 @@ GATES = [
         "D hit@1",
         ("by_mode", "D", "hit@1"),
         ">=", 0.90,
-        "Mode D (semantic rerank) must surface the correct file at rank 1 for ≥90 % of tasks",
+        "Mode D (semantic rerank) must surface the correct file at rank 1 for >=90 % of tasks",
     ),
     (
         "D hit@8",
@@ -66,7 +66,7 @@ GATES = [
         "D MRR",
         ("by_mode", "D", "mrr"),
         ">=", 0.95,
-        "Mode D mean reciprocal rank must be ≥ 0.95",
+        "Mode D mean reciprocal rank must be >= 0.95",
     ),
     # Semantic safety (Mode D vs C comparison)
     (

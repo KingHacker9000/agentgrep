@@ -132,6 +132,25 @@ These are not current work. Add only if real codebase tests show a specific gap.
 
 ---
 
+## Benchmark versions
+
+### public-v0.1 — stable gated baseline (14 labeled tasks)
+
+`tasks/public-v0.1.jsonl` and `labels/public-v0.1.jsonl` are **frozen**. The
+regression gates in `scripts/check-eval-gates.py` are calibrated against this
+set. Do not add or remove tasks here; gate thresholds are tied to the
+per-task score distribution.
+
+### public-v0.2 — expanded harder benchmark (26 labeled tasks, diagnostic)
+
+`tasks/public-v0.2.jsonl` and `labels/public-v0.2.jsonl` add 12 harder tasks
+on top of the v0.1 set (new symbol-tracing, refactor-prep, impact-check, and
+workflow queries). This version is **diagnostic only**: no gates are enforced
+against it yet. Use it to observe where the current modes fall short before
+deciding on new gate thresholds.
+
+---
+
 ## Contents of this folder
 
 | File | Purpose |
@@ -144,8 +163,10 @@ These are not current work. Add only if real codebase tests show a specific gap.
 | `TASKS.md` | Task categories and example prompts |
 | `RESULT_TEMPLATE.md` | Copy-paste template for recording one manual evaluation run |
 | `public-repos.jsonl` | Repo manifest (pinned public repos) |
-| `tasks/public-v0.1.jsonl` | Public task set |
-| `labels/public-v0.1.jsonl` | Relevance labels for the public task set |
+| `tasks/public-v0.1.jsonl` | Public task set — **frozen**, 14 labeled tasks, gated |
+| `labels/public-v0.1.jsonl` | Relevance labels for the public task set — **frozen** |
+| `tasks/public-v0.2.jsonl` | Expanded task set — 26 labeled tasks, diagnostic only |
+| `labels/public-v0.2.jsonl` | Relevance labels for the expanded task set |
 
 The runnable harness lives in `scripts/`:
 
@@ -167,6 +188,7 @@ qualitative review.
 
 ```powershell
 # 1. (Optional) validate task/label data first.
+#    Use public-v0.1 for gated runs; public-v0.2 for diagnostic/exploratory runs.
 python scripts/analyze-eval.py --validate `
   --tasks docs/evaluation/tasks/public-v0.1.jsonl `
   --labels docs/evaluation/labels/public-v0.1.jsonl
