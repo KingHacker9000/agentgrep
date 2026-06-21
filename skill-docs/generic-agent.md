@@ -84,6 +84,8 @@ agentgrep trace <SymbolName> --json
 # index_status "found"    → peek the body
 # index_status "external" → dep_package names the library; callers show usage
 # index_status "not_found" → run next_actions[0] (rg fallback)
+agentgrep trace <SymbolName> --callers-body --json        # add per-caller function bodies
+agentgrep trace <SymbolName> --include-tests --json       # split test callers into test_callers[]
 agentgrep peek <SymbolName> --file <path> --json
 ```
 
@@ -109,6 +111,20 @@ agentgrep files "partial-name-or-glob" --json
 | `"not_found"` | Not in repo or any dep | Run `next_actions[0]` — rg fallback command |
 
 **Empty `callers[]` does not mean unused.** Only indexed references are captured.
+
+`--callers-body`: each `callers[]` entry gains `containing_function` with the enclosing function's
+body (≤ 60 lines; longer functions are smart-truncated with the call site always included).
+Use when you need to edit every callsite — avoids a separate file read per caller.
+
+`--include-tests`: routes test-file callers to `test_callers[]` instead of mixing with `callers[]`.
+
+## `find` auto-expansion
+
+When results are low-confidence, `find` automatically re-queries with the best-matching vocabulary
+term from the index and returns results in `auto_expansion: { original_query, requery, candidates[] }`.
+
+- If `auto_expansion` is present: use `auto_expansion.requery` for follow-up `trace`/`peek` calls.
+- If auto-expansion also returns low scores: call `agentgrep overview --only vocab` for the full vocabulary list.
 
 ## Evidence and citation rules
 

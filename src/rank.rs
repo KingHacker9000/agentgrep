@@ -410,7 +410,6 @@ fn build_candidate(
     let mut evidence = Vec::new();
     let mut budget = ScoreBudget::new();
     let mut matched_terms = BTreeSet::new();
-    let mut path_shape_tier = 0usize;
 
     for token_match in collect_token_matches(profile, &path_tokens, &file_name_tokens, &matches) {
         budget.lexical += token_match.score;
@@ -420,12 +419,11 @@ fn build_candidate(
         matched_terms.insert(token_match.term);
     }
 
-    if let Some((boost, tier, evidence_item)) =
+    if let Some((boost, _, evidence_item)) =
         filename_shape_boost(profile, &path_tokens, &file_name_tokens)
     {
         budget.filename_shape += boost;
         evidence.push(evidence_item);
-        path_shape_tier = path_shape_tier.max(tier);
     }
 
     if let Some(cluster) = best_exact_cluster {
@@ -487,9 +485,8 @@ fn build_candidate(
 
     budget.role += apply_role_weight(&role, &mut evidence);
 
-    let mut index_tier = path_shape_tier;
     if let Some(index) = index {
-        let (sym_def_score, ref_score, ev_tier) = apply_index_evidence(
+        let (sym_def_score, ref_score, _) = apply_index_evidence(
             &normalized_path,
             &role,
             profile,
@@ -499,7 +496,6 @@ fn build_candidate(
         );
         budget.symbol_def += sym_def_score;
         budget.reference += ref_score;
-        index_tier = index_tier.max(ev_tier);
         budget.lexical += apply_lex_score(
             &normalized_path,
             &profile.lex_tokens,
@@ -635,7 +631,6 @@ fn build_candidate(
             evidence,
             symbols: candidate_symbols,
         },
-        tier: index_tier,
         matched_terms: matched_terms.len(),
         raw_score,
     }
@@ -1471,7 +1466,6 @@ struct IndexSignal {
 
 struct RankedCandidate {
     candidate: FileCandidate,
-    tier: usize,
     matched_terms: usize,
     raw_score: f64,
 }

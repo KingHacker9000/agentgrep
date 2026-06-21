@@ -54,6 +54,8 @@ agentgrep blast <file> --json                       # check impact before editin
 
 ```bash
 agentgrep trace <SymbolName> --json                 # all callers and callees
+agentgrep trace <SymbolName> --callers-body --json  # + each caller's enclosing function body
+                                                    #   use when signature change → edit all callers
 agentgrep related <file> --json                     # connected neighbors
 agentgrep blast <symbol> --json                     # conservative impact radius
 ```
@@ -77,6 +79,21 @@ agentgrep files "partial-name-or-glob" --json       # substring / glob against i
 **Empty `callers[]` does not mean unused** — only indexed references are captured.
 **`"external"` is not an error** — it means the symbol is in a library, not this repo.
 
+### `trace` flags — when to add them
+
+```bash
+agentgrep trace <sym> --json                    # default: definitions + callers + callees
+agentgrep trace <sym> --callers-body --json     # + AST-extracted function body for each caller
+                                                #   use when you're about to edit callsites —
+                                                #   avoids reading each caller file manually
+agentgrep trace <sym> --include-tests --json    # separates test callers into test_callers[]
+                                                #   use when you need test patterns for the symbol
+agentgrep trace <sym> --callers-body --include-tests --json   # both
+```
+
+`containing_function` fields per caller: `name`, `signature`, `line_start`, `line_end`, `body`, `truncated`.
+`truncated: true` means body > 60 lines; header + call-site window are always included.
+
 ## `find --brief` output
 
 ```
@@ -84,9 +101,20 @@ src/path/file.rs:42:SymbolName  [score:0.82 conf:high role:source]
 vocab: SymA, SymB, SymC, ...
 ```
 
-If the top score is below 0.30 and a "Low-confidence" note appears, the query terms don't match
-codebase vocabulary. Use the `vocab:` line terms to requery — they come from actual symbol names
-in the top candidates.
+**Auto-expansion**: when results are low-confidence (score < 0.30, or low confidence with score < 0.40),
+`find` automatically re-queries with the best-matching vocabulary term and returns condensed results
+in-line as `auto_expansion: { original_query, requery, candidates[] }`.
+
+```
+vocab: ConnectionCounts, EdgeMap, ...
+auto-expansion: "postgresql database connection" → "ConnectionCounts"
+  src/types.rs:281:ConnectionCounts  [0.66 high source]
+  ...
+note: Low confidence for "..." — auto-expanded to "ConnectionCounts"
+```
+
+If `auto_expansion` is present in the JSON response, **use its `requery` term** for follow-up
+`trace` and `peek` calls. If auto-expansion also returns low scores, use `agentgrep overview --only vocab` to get the full vocabulary list.
 
 ## Output fields — stable vs best-effort
 
@@ -94,9 +122,13 @@ in the top candidates.
 |---|---|---|
 | `candidates[].file_path` | ✓ stable | Use this path |
 | `candidates[].score` | ✗ | Relative within one response only; do not compare across queries |
+| `find.vocabulary[]` | ✓ stable | Symbol names from top results — use for follow-up queries |
+| `find.auto_expansion` | ✓ stable | Present on mismatch — use `requery` for follow-up trace/peek |
 | `trace.index_status` | ✓ stable | `"found"` / `"external"` / `"not_found"` |
 | `trace.dep_package` | ✓ stable | Library name when status is `"external"` |
-| `trace.callers[]` | ✓ stable | Files that call this symbol |
+| `trace.callers[]` | ✓ stable | Production callers |
+| `trace.test_callers[]` | ✓ stable | Test callers (only with `--include-tests`) |
+| `trace.callers[].containing_function` | ✓ stable | AST function body (only with `--callers-body`) |
 | `trace.defined_in[]` | ✓ stable | Definition locations |
 | `overview.vocabulary[]` | ✓ stable | Key symbol names for query anchoring |
 | `next_actions[]` | ✓ stable | Follow these |

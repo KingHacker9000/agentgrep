@@ -60,27 +60,6 @@ pub fn symbol(
     }
 }
 
-pub fn symbol_with_extent(
-    name: String,
-    kind: SymbolKind,
-    file_path: &str,
-    line_number: usize,
-    end_line: usize,
-    visibility: Visibility,
-    signature: Option<String>,
-) -> IndexedSymbol {
-    IndexedSymbol {
-        name,
-        kind,
-        file_path: file_path.to_string(),
-        line_number,
-        visibility,
-        signature,
-        end_line: Some(end_line),
-        parent_class: None,
-    }
-}
-
 pub fn edge(
     edge_type: &str,
     from: &str,

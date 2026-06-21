@@ -148,13 +148,25 @@ Output:
 - `candidates[]` — ranked files with evidence snippets and symbol matches
 - `vocabulary[]` — top symbol names from candidates (use for follow-up queries)
 - `next_actions[]` — suggested follow-up commands
-- `note` — vocabulary mismatch warning if top score < 0.30
+- `note` — mismatch description when results are low-confidence
+- `auto_expansion` — present on mismatch: automatic re-query result (see below)
 
 `--brief` format:
 ```
 src/path/file.rs:42:SymbolName  [score:0.82 conf:high role:source]
 vocab: SymA, SymB, SymC, ...
+auto-expansion: "original query" → "VocabTerm"
+  src/path/file.rs:42:VocabTerm  [0.66 high source]
+  ...
+note: Low confidence for "..." — auto-expanded to "VocabTerm"
 ```
+
+**Auto-expansion**: when results are low-confidence (no strong evidence, score < 0.30 or top
+confidence `low` with score < 0.40), `find` automatically re-queries with the best-matching
+vocabulary term and returns condensed top-5 results in `auto_expansion`.
+
+If `auto_expansion` is present in the JSON response: use `auto_expansion.requery` for all
+follow-up `trace` and `peek` calls. Do not re-query manually with the same original query.
 
 ### `trace <symbol>`
 
@@ -169,10 +181,26 @@ Call graph for a symbol. The `index_status` field is an action trigger:
 ```bash
 agentgrep trace SyntaxMapping --json
 agentgrep trace Blueprint --json
+
+# When you need to edit every callsite — avoids reading each caller file manually:
+agentgrep trace SyntaxMapping --callers-body --json
+
+# To study test patterns for the symbol:
+agentgrep trace SyntaxMapping --include-tests --json
+
+# Both:
+agentgrep trace SyntaxMapping --callers-body --include-tests --json
 ```
 
 **Empty `callers[]` does not mean unused** — only indexed references are captured.
 **`"external"` is not an error** — the symbol is defined in a dependency, not this repo.
+
+Flags:
+- `--callers-body` — adds `containing_function` to each `callers[]` entry: the AST-extracted
+  enclosing function body (≤ 60 lines; truncated with call site always visible). Capped at 10 callers.
+  Fields: `name`, `signature`, `line_start`, `line_end`, `body`, `truncated`.
+- `--include-tests` — routes test-file callers to `test_callers[]` instead of mixing into `callers[]`.
+  With `--callers-body`, test caller bodies are also extracted (max 5).
 
 ### `peek <symbol>`
 
@@ -264,7 +292,9 @@ agentgrep blast src/search.rs --json
 ### Stable fields (safe to parse)
 
 - `candidates[].file_path`, `candidates[].line_range`
+- `find.vocabulary[]`, `find.auto_expansion.requery`, `find.auto_expansion.candidates[]`
 - `trace.index_status`, `trace.dep_package`, `trace.defined_in[]`, `trace.callers[]`
+- `trace.test_callers[]` (with `--include-tests`), `trace.callers[].containing_function` (with `--callers-body`)
 - `overview.vocabulary[]`, `overview.key_types[]`, `overview.entry_points[]`
 - `next_actions[]`
 - All top-level `path`, `query`, `index_status` fields
@@ -349,14 +379,17 @@ agentgrep overview [--full] [--min-refs N] [--only SECTIONS] [--json]
 agentgrep find "<query>" [--brief] [--role source|doc|config|test] [--json]
   Ranked file search. Use vocabulary from overview for best results. --brief gives compact
   output ending with a vocab: line for follow-up anchoring.
+  On mismatch, auto_expansion in response contains best-match requery — use it for follow-up.
 
 agentgrep index [--status]
   Build or check the local code index. Required before trace, peek, files, overview.
   Run once per session; --status checks freshness.
 
-agentgrep trace <symbol> [--json]
+agentgrep trace <symbol> [--callers-body] [--include-tests] [--json]
   Call graph. index_status: "found" (local), "external" (dep; dep_package names it),
   "not_found" (run next_actions[0]). Empty callers[] ≠ unused.
+  --callers-body: adds containing_function body to each caller (use before editing callsites).
+  --include-tests: routes test callers to test_callers[].
 
 agentgrep peek <symbol> [--file <path>] [--context N] [--json]
   Read a symbol's implementation. Use after trace identifies defined_in[]. --context N
@@ -383,10 +416,12 @@ Available local tools:
     Cold-start orientation (run once per session). Sections: types,functions,packages,entries,connected,vocab
 - agentgrep find "<query>" [--brief] [--json]
     Ranked file search. Use vocab from overview to anchor queries.
+    On mismatch, auto_expansion.requery in response has the best vocab match — use it for follow-up.
 - agentgrep index [--status]
     Build/check the local code index. Required before structural commands.
-- agentgrep trace <symbol> [--json]
-    Call graph. index_status "found"=local, "external"=dep (dep_package names it), "not_found"=use rg
+- agentgrep trace <symbol> [--callers-body] [--include-tests] [--json]
+    Call graph. index_status "found"=local, "external"=dep (dep_package names it), "not_found"=use rg.
+    --callers-body: adds enclosing function body per caller. --include-tests: splits test callers.
 - agentgrep peek <symbol> [--file <path>] [--context N] [--json]
     Read a symbol's body. Use after trace.
 - agentgrep files "<pattern>" [--json]
@@ -401,4 +436,6 @@ Available local tools:
 Rules: run overview once at session start. Run find before opening files.
 Run blast before editing widely-connected files. Always use --json for parsing.
 "external" trace status = in a dependency, not an error. Empty callers[] ≠ unused.
+If find returns auto_expansion, use auto_expansion.requery for follow-up calls.
+Add --callers-body to trace when you need to edit every callsite.
 ```

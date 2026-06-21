@@ -127,14 +127,18 @@ agentgrep overview [--full] [--min-refs N] [--only SECTIONS] [--json]
 agentgrep find "<query>" [--brief] [--role source|doc|config|test] [--json]
   Ranked file search. Use vocabulary from overview for best results. --brief gives compact
   output with a vocab: line for follow-up query anchoring.
+  On mismatch (low score/confidence), auto-expands to best vocabulary term; check
+  auto_expansion.requery in the response before re-querying manually.
 
 agentgrep index [--status]
   Build or check the local code index. Required before trace, peek, files, map (full context).
   Run once per session; --status checks freshness.
 
-agentgrep trace <symbol> [--json]
+agentgrep trace <symbol> [--callers-body] [--include-tests] [--json]
   Call graph: who calls it, where defined, what it calls.
   index_status: "found" (local) | "external" (dep; dep_package names it) | "not_found" (use rg)
+  --callers-body: adds containing_function body to each caller (use before editing callsites)
+  --include-tests: splits test callers into test_callers[] (use to study test patterns)
 
 agentgrep peek <symbol> [--file <path>] [--context N] [--json]
   Read a symbol's implementation body. Use after trace to read the code.
@@ -159,4 +163,6 @@ Rules:
 - Always use --json when parsing output.
 - index_status "external" means "in a dependency" — not an error.
 - Empty callers[] does not mean unused.
+- If find returns auto_expansion, use auto_expansion.requery for follow-up calls.
+- Add --callers-body to trace when you need to edit every callsite.
 ```
