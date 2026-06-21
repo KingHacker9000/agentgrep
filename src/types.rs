@@ -156,15 +156,30 @@ pub struct FileMatch {
     pub role: String,
 }
 
+/// A single external-dependency import record captured at index time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DepImport {
+    /// The imported name (leaf symbol or module alias), e.g. "SyntaxSet", "Blueprint".
+    pub symbol_or_module: String,
+    /// The top-level package/crate that provides it, e.g. "syntect", "flask".
+    pub dep_package: String,
+    pub file_path: String,
+    pub line: usize,
+}
+
 /// Report for `agentgrep trace <symbol>` — caller/callee graph.
 #[derive(Debug, Clone, Serialize)]
 pub struct TraceReport {
     pub symbol: String,
+    /// "found" | "external" | "not_found"
     pub index_status: String,
     pub defined_in: Vec<TraceDefinition>,
     pub callers: Vec<TraceCallSite>,
     pub callees: Vec<TraceCallSite>,
     pub next_actions: Vec<String>,
+    /// Set when the symbol is determined to be from an external dependency.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dep_package: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }

@@ -16,10 +16,10 @@ use crate::parser::extracted::{dedup_edges, dedup_symbols, ImportBinding};
 use crate::parser::language::{parent_dir, RepoLookup};
 use crate::repo::{display_path, RepoInfo};
 use crate::text::shorten_snippet;
-use crate::types::{IndexedSymbol, SymbolKind, Visibility};
+use crate::types::{DepImport, IndexedSymbol, SymbolKind, Visibility};
 use serde_json::Value;
 
-pub const INDEX_SCHEMA_VERSION: u32 = 8;
+pub const INDEX_SCHEMA_VERSION: u32 = 9;
 pub const HASH_LIMIT_BYTES: u64 = 1024 * 256;
 pub const MAX_LEX_TERMS: usize = 300;
 const LEX_READ_SIZE_LIMIT: u64 = HASH_LIMIT_BYTES;
@@ -37,6 +37,9 @@ pub struct RepoIndex {
     pub symbol_references: Vec<IndexedSymbolReference>,
     pub edges: Vec<IndexedEdge>,
     pub stats: IndexStats,
+    /// External dependency imports captured at index time.
+    #[serde(default)]
+    pub dep_imports: Vec<DepImport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -577,6 +580,8 @@ fn build_index(repo: &RepoInfo) -> Result<RepoIndex> {
     let symbol_kind_counts = count_symbol_kinds(&symbols);
     let indexed_at_unix = unix_now();
 
+    let dep_imports = build_dep_imports(&files, &source_texts);
+
     Ok(RepoIndex {
         schema_version: INDEX_SCHEMA_VERSION,
         repo_root: display_path(&repo.root),
@@ -596,7 +601,342 @@ fn build_index(repo: &RepoInfo) -> Result<RepoIndex> {
             lex_file_count,
             avg_doc_length,
         },
+        dep_imports,
     })
+}
+
+/// Scan source files to capture external-dependency import records.
+/// "External" = import path whose root segment is not a local module / file in the repo.
+fn build_dep_imports(
+    files: &[IndexedFile],
+    source_texts: &BTreeMap<String, String>,
+) -> Vec<DepImport> {
+    // Build a set of top-level directory names that correspond to local Python packages.
+    let local_python_tops: HashSet<String> = files
+        .iter()
+        .filter(|f| f.path.ends_with(".py"))
+        .filter_map(|f| {
+            let p = f.path.replace('\\', "/");
+            p.split('/').next().map(|s| s.to_string())
+        })
+        .collect();
+
+    // Build Rust module lookup once for the whole repo.
+    let module_lookup = build_rust_module_lookup(files);
+
+    let mut dep_imports: Vec<DepImport> = Vec::new();
+
+    for file in files
+        .iter()
+        .filter(|f| matches!(f.role, FileRole::Source))
+    {
+        let Some(text) = source_texts.get(&file.path) else {
+            continue;
+        };
+        let path = &file.path;
+
+        if path.ends_with(".rs") {
+            collect_rust_dep_imports(path, text, &module_lookup, &mut dep_imports);
+        } else if path.ends_with(".py") {
+            collect_python_dep_imports(path, text, &local_python_tops, &mut dep_imports);
+        } else if path.ends_with(".js")
+            || path.ends_with(".mjs")
+            || path.ends_with(".cjs")
+            || path.ends_with(".jsx")
+            || path.ends_with(".ts")
+            || path.ends_with(".tsx")
+        {
+            collect_js_dep_imports(path, text, &mut dep_imports);
+        } else if path.ends_with(".go") {
+            collect_go_dep_imports(path, text, files, &mut dep_imports);
+        }
+    }
+
+    // Deduplicate by (symbol_or_module, dep_package, file_path)
+    dep_imports.sort_by(|a, b| {
+        a.symbol_or_module
+            .cmp(&b.symbol_or_module)
+            .then(a.dep_package.cmp(&b.dep_package))
+            .then(a.file_path.cmp(&b.file_path))
+    });
+    dep_imports.dedup_by(|a, b| {
+        a.symbol_or_module == b.symbol_or_module
+            && a.dep_package == b.dep_package
+            && a.file_path == b.file_path
+    });
+
+    dep_imports
+}
+
+/// Rust: use statements whose root segment is not a local crate module → external.
+fn collect_rust_dep_imports(
+    file_path: &str,
+    source: &str,
+    module_lookup: &HashMap<String, String>,
+    out: &mut Vec<DepImport>,
+) {
+    for (line_idx, line) in source.lines().enumerate() {
+        let stripped = strip_line_comment(line).trim();
+        let Some(body) = parse_rust_use_statement(stripped) else {
+            continue;
+        };
+        for path in expand_rust_use_paths(body) {
+            let Some(first) = path.first() else { continue };
+            // Skip internal paths and std-adjacent anchors
+            if matches!(first.as_str(), "crate" | "super" | "self") {
+                continue;
+            }
+            // If the first segment resolves to a local module, it's internal
+            if module_lookup.contains_key(first.as_str()) {
+                continue;
+            }
+            let dep_package = first.replace('-', "_");
+            // Leaf is the imported symbol; skip wildcards and `self`
+            if let Some(leaf) = path.last() {
+                if leaf == "_" || leaf == "self" || leaf == "*" {
+                    continue;
+                }
+                out.push(DepImport {
+                    symbol_or_module: leaf.clone(),
+                    dep_package,
+                    file_path: file_path.to_string(),
+                    line: line_idx + 1,
+                });
+            }
+        }
+    }
+}
+
+/// Python: `import X` / `from X import Y` where X doesn't map to a local file.
+fn collect_python_dep_imports(
+    file_path: &str,
+    source: &str,
+    local_tops: &HashSet<String>,
+    out: &mut Vec<DepImport>,
+) {
+    for (line_idx, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        let line_num = line_idx + 1;
+
+        // `import X` or `import X.Y.Z`
+        if let Some(rest) = trimmed.strip_prefix("import ") {
+            for module in rest.split(',') {
+                let module = module.trim().split_whitespace().next().unwrap_or("");
+                let top = module.split('.').next().unwrap_or("");
+                if top.is_empty() || local_tops.contains(top) {
+                    continue;
+                }
+                out.push(DepImport {
+                    symbol_or_module: module.to_string(),
+                    dep_package: top.to_string(),
+                    file_path: file_path.to_string(),
+                    line: line_num,
+                });
+            }
+            continue;
+        }
+
+        // `from X import Y, Z` — skip relative imports (leading dots)
+        if let Some(rest) = trimmed.strip_prefix("from ") {
+            let Some((module_part, names_part)) = rest.split_once(" import ") else {
+                continue;
+            };
+            let module = module_part.trim();
+            if module.starts_with('.') {
+                continue; // relative import — local
+            }
+            let top = module.split('.').next().unwrap_or("");
+            if top.is_empty() || local_tops.contains(top) {
+                continue;
+            }
+            for name in names_part.split(',') {
+                let name = name
+                    .trim()
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .split(" as ")
+                    .next()
+                    .unwrap_or("")
+                    .trim_end_matches(')');
+                if name.is_empty() || name == "*" {
+                    continue;
+                }
+                out.push(DepImport {
+                    symbol_or_module: name.to_string(),
+                    dep_package: top.to_string(),
+                    file_path: file_path.to_string(),
+                    line: line_num,
+                });
+            }
+        }
+    }
+}
+
+/// JS/TS: `import { X } from 'pkg'` or `import X from 'pkg'` where pkg is a bare specifier.
+fn collect_js_dep_imports(file_path: &str, source: &str, out: &mut Vec<DepImport>) {
+    for (line_idx, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("import ") {
+            continue;
+        }
+        let line_num = line_idx + 1;
+
+        // Extract the `from '...'` or `from "..."` source string
+        let pkg = if let Some(from_pos) = trimmed.rfind(" from ") {
+            let after = trimmed[from_pos + 6..].trim().trim_matches(';');
+            let pkg = after
+                .trim_matches('"')
+                .trim_matches('\'')
+                .trim_matches('`');
+            pkg.to_string()
+        } else if trimmed.starts_with("import ") && trimmed.contains('"') {
+            // `import 'side-effect'`
+            let pkg = trimmed
+                .trim_start_matches("import ")
+                .trim()
+                .trim_matches(';')
+                .trim_matches('"')
+                .trim_matches('\'');
+            pkg.to_string()
+        } else {
+            continue;
+        };
+
+        // Bare specifier = no leading `.` or `/` = external package
+        if pkg.starts_with('.') || pkg.starts_with('/') {
+            continue;
+        }
+        // Top-level package name: '@scope/name' → '@scope/name', 'events' → 'events'
+        let dep_package = if pkg.starts_with('@') {
+            pkg.splitn(3, '/').take(2).collect::<Vec<_>>().join("/")
+        } else {
+            pkg.split('/').next().unwrap_or(&pkg).to_string()
+        };
+        if dep_package.is_empty() {
+            continue;
+        }
+
+        // Extract named imports: `{ X, Y as Z }` between `{` and `}`
+        let between_braces = trimmed
+            .find('{')
+            .and_then(|open| trimmed.find('}').map(|close| &trimmed[open + 1..close]));
+
+        if let Some(names) = between_braces {
+            for name in names.split(',') {
+                let name = name.trim().split(" as ").next().unwrap_or("").trim();
+                if name.is_empty() || name == "*" {
+                    continue;
+                }
+                out.push(DepImport {
+                    symbol_or_module: name.to_string(),
+                    dep_package: dep_package.clone(),
+                    file_path: file_path.to_string(),
+                    line: line_num,
+                });
+            }
+        }
+
+        // Default import: `import X from 'pkg'` or `import X, { Y } from 'pkg'`
+        let after_import = trimmed.trim_start_matches("import ").trim();
+        let default_part = after_import.split('{').next().unwrap_or("").trim();
+        let default_import = default_part
+            .trim()
+            .trim_end_matches(',')
+            .trim()
+            .split_whitespace()
+            .next()
+            .unwrap_or("");
+        if !default_import.is_empty()
+            && default_import != "type"
+            && default_import != "*"
+            && default_import.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+        {
+            out.push(DepImport {
+                symbol_or_module: default_import.to_string(),
+                dep_package: dep_package.clone(),
+                file_path: file_path.to_string(),
+                line: line_num,
+            });
+        }
+    }
+}
+
+/// Go: `import "github.com/user/repo/pkg"` where path doesn't start with the repo module.
+fn collect_go_dep_imports(
+    file_path: &str,
+    source: &str,
+    files: &[IndexedFile],
+    out: &mut Vec<DepImport>,
+) {
+    // Derive the repo module prefix from go.mod if present.
+    let repo_module = files
+        .iter()
+        .find(|f| f.path == "go.mod" || f.path.ends_with("/go.mod"))
+        .map(|_| "") // placeholder — we'd read go.mod, but approximate with empty
+        .unwrap_or("");
+    let _ = repo_module; // used below
+
+    let mut in_import_block = false;
+    for (line_idx, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        let line_num = line_idx + 1;
+
+        if trimmed == "import (" {
+            in_import_block = true;
+            continue;
+        }
+        if in_import_block && trimmed == ")" {
+            in_import_block = false;
+            continue;
+        }
+
+        let pkg_str = if in_import_block {
+            // Either `"pkg/path"` or `alias "pkg/path"`
+            let s = trimmed.trim_matches('"');
+            if s == trimmed {
+                // might be alias "pkg"
+                trimmed
+                    .split('"')
+                    .nth(1)
+                    .map(|s| s.to_string())
+                    .unwrap_or_default()
+            } else {
+                s.to_string()
+            }
+        } else if let Some(rest) = trimmed.strip_prefix("import ") {
+            rest.trim().trim_matches('"').to_string()
+        } else {
+            continue;
+        };
+
+        if pkg_str.is_empty() {
+            continue;
+        }
+
+        // Standard library packages have no `.` in the first segment.
+        // External packages typically have a domain (e.g. "github.com/...").
+        // We include both — stdlib is still "external" to this repo.
+        let top = pkg_str.split('/').next().unwrap_or("");
+        // Use last segment as the "symbol" (the default import name in Go).
+        let symbol = pkg_str.split('/').last().unwrap_or(&pkg_str).to_string();
+        let dep_package = if top.contains('.') {
+            // domain-prefixed, e.g. "github.com/user/repo" → use second segment as package name
+            pkg_str
+                .split('/')
+                .nth(2)
+                .unwrap_or(top)
+                .to_string()
+        } else {
+            top.to_string()
+        };
+        out.push(DepImport {
+            symbol_or_module: symbol,
+            dep_package,
+            file_path: file_path.to_string(),
+            line: line_num,
+        });
+    }
 }
 
 fn build_same_area_edges(files: &[IndexedFile]) -> Vec<IndexedEdge> {
@@ -3087,6 +3427,7 @@ mod tests {
                 connection_count: 0,
                 ..Default::default()
             },
+                dep_imports: vec![],
         };
         assert_eq!(determine_state(&repo, Some(&index)), IndexState::Fresh);
 
@@ -3150,6 +3491,7 @@ mod tests {
                 connection_count: 1,
                 ..Default::default()
             },
+                dep_imports: vec![],
         };
         let json = serde_json::to_value(&index).unwrap();
         assert_eq!(json["schema_version"], INDEX_SCHEMA_VERSION);
@@ -3189,6 +3531,7 @@ mod tests {
                 connection_count: 0,
                 ..Default::default()
             },
+                dep_imports: vec![],
         };
         let index_file = index_path(&repo);
         write_index_file(&index_file, &index).unwrap();
@@ -3316,3 +3659,4 @@ mod tests {
         let _ = fs::remove_dir_all(base);
     }
 }
+

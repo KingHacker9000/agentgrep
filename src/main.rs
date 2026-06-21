@@ -1,5 +1,6 @@
 mod blast;
 mod cli;
+mod dep_resolve;
 mod files;
 mod index;
 mod map;
@@ -235,7 +236,7 @@ fn run() -> Result<()> {
                     "no index found — run `agentgrep index` first to enable trace"
                 );
             };
-            let report = trace::build_report(&symbol, index)?;
+            let report = trace::build_report(&symbol, index, &repo.root)?;
             trace::write_report(&report, json)?;
         }
         cli::Commands::Semantic { action } => {

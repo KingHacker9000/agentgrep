@@ -418,6 +418,7 @@ mod tests {
                     connection_count: 1,
                     ..Default::default()
                 },
+                        dep_imports: vec![],
             }),
         };
         let report = build_report_from_loaded(&repo, &loaded, "src/search.rs").unwrap();
@@ -497,6 +498,7 @@ mod tests {
                     connection_count: 2,
                     ..Default::default()
                 },
+                        dep_imports: vec![],
             }),
         };
         let report = build_report_from_loaded(&repo, &loaded, "src/search.rs").unwrap();
@@ -551,6 +553,7 @@ mod tests {
                     connection_count: 0,
                     ..Default::default()
                 },
+                        dep_imports: vec![],
             }),
         };
         let report = build_report_from_loaded(&repo, &loaded, "src/search.rs").unwrap();
@@ -611,3 +614,4 @@ mod tests {
         })
     }
 }
+

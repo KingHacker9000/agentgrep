@@ -2057,6 +2057,7 @@ mod tests {
                 connection_count: 0,
                 ..Default::default()
             },
+                dep_imports: vec![],
         }
     }
 
@@ -2740,6 +2741,7 @@ mod tests {
                 lex_file_count,
                 avg_doc_length,
             },
+                dep_imports: vec![],
         }
     }
 
@@ -2897,6 +2899,7 @@ mod tests {
                 lex_file_count: 2,
                 avg_doc_length: 300.0,
             },
+                dep_imports: vec![],
         };
 
         let candidates = rank_with_index(
@@ -3024,6 +3027,7 @@ mod tests {
                 connection_count: 1,
                 ..Default::default()
             },
+                dep_imports: vec![],
         };
 
         let candidates = rank_with_index(
@@ -3107,6 +3111,7 @@ mod tests {
                 connection_count: 1,
                 ..Default::default()
             },
+                dep_imports: vec![],
         };
 
         let candidates = rank_with_index(
@@ -3208,3 +3213,4 @@ mod tests {
         );
     }
 }
+

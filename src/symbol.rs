@@ -642,6 +642,7 @@ mod tests {
                     connection_count: 2,
                     ..Default::default()
                 },
+                        dep_imports: vec![],
             }),
         }
     }
@@ -767,6 +768,7 @@ mod tests {
                     connection_count: 0,
                     ..Default::default()
                 },
+                        dep_imports: vec![],
             }),
         };
         let report = build_report_from_loaded(&repo(), &loaded, "SearchResult").unwrap();
@@ -842,6 +844,7 @@ mod tests {
                 connection_count: 0,
                 ..Default::default()
             },
+                dep_imports: vec![],
         };
         let symbol = IndexedSymbol {
             name: "SearchResult".to_string(),
@@ -913,6 +916,7 @@ mod tests {
                 connection_count: 0,
                 ..Default::default()
             },
+                dep_imports: vec![],
         };
         let symbol = IndexedSymbol {
             name: "LLMClient".to_string(),
@@ -1034,3 +1038,4 @@ mod tests {
             .any(|item| item.symbol.name == "fixture_helper"));
     }
 }
+

@@ -1236,6 +1236,7 @@ mod tests {
                     connection_count: 3,
                     ..Default::default()
                 },
+                        dep_imports: vec![],
             }),
         }
     }
@@ -1323,3 +1324,4 @@ mod tests {
         assert!(json["next_actions"].is_array());
     }
 }
+
