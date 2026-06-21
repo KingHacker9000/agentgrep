@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+﻿use anyhow::{anyhow, Result};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -301,6 +301,7 @@ fn render_symbols(symbols: &[&IndexedSymbol]) -> Vec<IndexedSymbol> {
                 .as_ref()
                 .map(|signature| shorten_snippet(signature, 120)),
             end_line: symbol.end_line,
+            parent_class: symbol.parent_class.clone(),
         })
         .collect()
 }
@@ -537,7 +538,8 @@ mod tests {
                     visibility: crate::types::Visibility::Public,
                     signature: Some("pub fn run()".to_string()),
                     end_line: None,
-                }],
+
+            parent_class: None,                }],
                 symbol_references: vec![],
                 edges: vec![],
                 stats: IndexStats {

@@ -54,6 +54,12 @@ pub enum Commands {
             help = "Enable semantic candidate expansion and reranking (requires configured provider)."
         )]
         semantic: bool,
+        /// Hard-exclude doc, lockfile, and generated files from results. Keeps output focused on source code.
+        #[arg(long, help = "Exclude doc, lockfile, and generated files from results.")]
+        exclude_docs: bool,
+        /// Compact one-line-per-candidate output. Useful for agent pipelines to minimize context.
+        #[arg(long, help = "Compact one-line-per-candidate output.")]
+        brief: bool,
         /// Write stable JSON instead of text.
         #[arg(long, help = "Write stable JSON instead of text.")]
         json: bool,
@@ -119,6 +125,28 @@ pub enum Commands {
         /// File path to disambiguate when the symbol appears in multiple files.
         #[arg(long, value_name = "FILE")]
         file: Option<String>,
+        /// Line number to disambiguate when the same symbol appears multiple times in one file.
+        #[arg(long, value_name = "LINE")]
+        line: Option<usize>,
+        /// Extra context lines to show before and after the symbol body.
+        #[arg(long, value_name = "N", default_value_t = 0)]
+        context: usize,
+        /// Write stable JSON instead of text.
+        #[arg(long, help = "Write stable JSON instead of text.")]
+        json: bool,
+    },
+    /// List indexed files matching a name pattern (requires index).
+    Files {
+        /// Substring or glob pattern to match against file paths.
+        pattern: String,
+        /// Write stable JSON instead of text.
+        #[arg(long, help = "Write stable JSON instead of text.")]
+        json: bool,
+    },
+    /// Show callers and callees for an indexed symbol (requires index).
+    Trace {
+        /// Symbol name to trace.
+        symbol: String,
         /// Write stable JSON instead of text.
         #[arg(long, help = "Write stable JSON instead of text.")]
         json: bool,

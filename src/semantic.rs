@@ -1,4 +1,4 @@
-/// Semantic retrieval backend — Milestone 8.
+﻿/// Semantic retrieval backend â€” Milestone 8.
 ///
 /// Storage paths:
 ///   git repos:     .git/agentgrep/semantic/  (meta.json + vectors.bin)
@@ -21,7 +21,7 @@ use crate::index::RepoIndex;
 use crate::repo::{display_path, RepoInfo};
 use crate::types::{Confidence, Evidence, FileCandidate};
 
-// ── constants ─────────────────────────────────────────────────────────────────
+// â”€â”€ constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 pub const SEMANTIC_SCHEMA_VERSION: u32 = 1;
 pub const PROVIDER: &str = "fastembed";
@@ -46,7 +46,7 @@ const FILE_WARN_THRESHOLD: usize = 5_000;
 /// Hard limit on files embedded in a single run to bound memory usage.
 const FILE_HARD_CAP: usize = 50_000;
 
-// ── legacy availability types (kept for tests; no longer called from main) ───
+// â”€â”€ legacy availability types (kept for tests; no longer called from main) â”€â”€â”€
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,7 +64,7 @@ pub fn require_configured(_subcommand: &str) -> Result<()> {
     Ok(())
 }
 
-// ── metadata types ────────────────────────────────────────────────────────────
+// â”€â”€ metadata types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SemanticMeta {
@@ -99,7 +99,7 @@ pub struct SemanticBuildReport {
     pub model_cache_dir: PathBuf,
 }
 
-// ── platform paths ────────────────────────────────────────────────────────────
+// â”€â”€ platform paths â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 pub fn model_cache_dir() -> Result<PathBuf> {
     #[cfg(windows)]
@@ -130,7 +130,7 @@ pub fn semantic_dir(repo: &RepoInfo) -> PathBuf {
     }
 }
 
-// ── model management ──────────────────────────────────────────────────────────
+// â”€â”€ model management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn is_model_cached(cache_dir: &Path) -> bool {
     cache_dir.join(SENTINEL_FILE).exists()
@@ -178,7 +178,7 @@ pub fn ensure_model(cache_dir: &Path, yes: bool) -> Result<TextEmbedding> {
 
         if !proceed {
             bail!(
-                "download declined — semantic indexing requires the model.\n  \
+                "download declined â€” semantic indexing requires the model.\n  \
                  Re-run: agentgrep index --semantic"
             );
         }
@@ -221,7 +221,7 @@ pub fn load_model_for_find(cache_dir: &Path) -> Result<TextEmbedding> {
     })
 }
 
-// ── document building ─────────────────────────────────────────────────────────
+// â”€â”€ document building â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn build_file_document(
     path: &str,
@@ -264,12 +264,12 @@ fn read_file_preview(file_path: &Path) -> String {
     s.chars().take(TEXT_PREVIEW_CHARS).collect()
 }
 
-// ── binary vector storage ─────────────────────────────────────────────────────
+// â”€â”€ binary vector storage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
 // Format (little-endian):
 //   u32  num_vectors
 //   u32  dimensions
-//   [num_vectors × dimensions × f32]
+//   [num_vectors Ã— dimensions Ã— f32]
 
 fn vectors_path(sem_dir: &Path) -> PathBuf {
     sem_dir.join("vectors.bin")
@@ -336,7 +336,7 @@ fn read_vectors(path: &Path) -> Result<Vec<Vec<f32>>> {
     Ok(vectors)
 }
 
-// ── semantic index build ──────────────────────────────────────────────────────
+// â”€â”€ semantic index build â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Build and persist the semantic index.
 ///
@@ -360,7 +360,7 @@ pub fn build_semantic(
 
     let model = ensure_model(&cache_dir, yes)?;
 
-    // Build a symbol lookup: file_path → Vec<symbol_name>
+    // Build a symbol lookup: file_path â†’ Vec<symbol_name>
     let mut symbol_lookup: std::collections::HashMap<&str, Vec<String>> =
         std::collections::HashMap::new();
     for sym in &idx.symbols {
@@ -380,7 +380,7 @@ pub fn build_semantic(
     }
     if idx.files.len() > FILE_WARN_THRESHOLD {
         eprintln!(
-            "Warning: embedding {} files — first run may be slow.",
+            "Warning: embedding {} files â€” first run may be slow.",
             idx.files.len()
         );
     }
@@ -451,7 +451,7 @@ pub fn write_semantic_build_report(report: &SemanticBuildReport) {
     println!("- model cache:  {}", display_path(&report.model_cache_dir));
 }
 
-// ── semantic index load ───────────────────────────────────────────────────────
+// â”€â”€ semantic index load â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 pub fn load_semantic(repo: &RepoInfo) -> Result<SemanticIndex> {
     let sem_dir = semantic_dir(repo);
@@ -467,7 +467,7 @@ pub fn load_semantic(repo: &RepoInfo) -> Result<SemanticIndex> {
 
     let meta_bytes = fs::read(&meta_file).context("failed to read meta.json")?;
     let meta: SemanticMeta =
-        serde_json::from_slice(&meta_bytes).context("failed to parse meta.json — index may be corrupt; run `agentgrep index --semantic` to rebuild")?;
+        serde_json::from_slice(&meta_bytes).context("failed to parse meta.json â€” index may be corrupt; run `agentgrep index --semantic` to rebuild")?;
 
     // Schema version check: catch future upgrades.
     if meta.schema_version != SEMANTIC_SCHEMA_VERSION {
@@ -515,7 +515,7 @@ pub fn load_semantic(repo: &RepoInfo) -> Result<SemanticIndex> {
     Ok(SemanticIndex { meta, vectors })
 }
 
-// ── cosine similarity ─────────────────────────────────────────────────────────
+// â”€â”€ cosine similarity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
@@ -527,7 +527,7 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     (dot / (norm_a * norm_b)).clamp(-1.0, 1.0)
 }
 
-// ── find --semantic: expand candidates ───────────────────────────────────────
+// â”€â”€ find --semantic: expand candidates â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Returns true when `query` looks like a code identifier rather than natural language.
 ///
@@ -598,11 +598,11 @@ fn is_strong_symbol_anchor(candidate: &FileCandidate, query: &str) -> bool {
 ///
 /// Two independent guards run in sequence:
 ///
-/// 1. **Exact-phrase guard** — if any source/config file contains the verbatim
+/// 1. **Exact-phrase guard** â€” if any source/config file contains the verbatim
 ///    query phrase (`exact_phrase_match`, not fixture-like), every non-phrase-
 ///    anchor candidate is capped below the best phrase-anchor score.
 ///
-/// 2. **Symbol-definition guard** — if any source/config file holds an
+/// 2. **Symbol-definition guard** â€” if any source/config file holds an
 ///    `indexed_symbol_definition` entry whose symbol name matches the query
 ///    (not fixture-like), every candidate *without* such a definition is capped
 ///    below the best symbol-anchor score.  This prevents the printer-subsystem
@@ -661,7 +661,7 @@ fn apply_semantic_anchor_guard(candidates: &mut Vec<FileCandidate>, query: &str)
 /// `rank::rank_with_index`.
 ///
 /// For identifier-like queries (CamelCase / snake_case, no spaces), semantic results
-/// only annotate existing deterministic candidates — no score boost and no new
+/// only annotate existing deterministic candidates â€” no score boost and no new
 /// semantic-only candidates are injected, so deterministic ranking is fully preserved.
 ///
 /// Returns `(merged_candidates, semantic_status_string)`.
@@ -706,7 +706,7 @@ pub fn expand_candidates(
         return Ok((det_candidates, "active".to_string()));
     }
 
-    // Build path → index map for existing deterministic candidates.
+    // Build path â†’ index map for existing deterministic candidates.
     let mut det_map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for (i, c) in det_candidates.iter().enumerate() {
         det_map.insert(c.path.clone(), i);
@@ -745,6 +745,7 @@ pub fn expand_candidates(
                 line_ranges: vec![],
                 snippets: vec![],
                 evidence: vec![evidence],
+                symbols: vec![],
             });
         }
     }
@@ -767,7 +768,7 @@ pub fn expand_candidates(
     Ok((det_candidates, "active".to_string()))
 }
 
-// ── semantic status ───────────────────────────────────────────────────────────
+// â”€â”€ semantic status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 pub struct SemanticStatusReport {
     pub semantic_dir: PathBuf,
@@ -839,7 +840,7 @@ pub fn write_semantic_status_report(report: &SemanticStatusReport) {
     }
 }
 
-// ── semantic clean ────────────────────────────────────────────────────────────
+// â”€â”€ semantic clean â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 pub struct SemanticCleanReport {
     pub repo_index_path: Option<PathBuf>,
@@ -910,7 +911,7 @@ pub fn write_semantic_clean_report(report: &SemanticCleanReport) {
     }
 }
 
-// ── tests ─────────────────────────────────────────────────────────────────────
+// â”€â”€ tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[cfg(test)]
 mod tests {
@@ -1065,6 +1066,7 @@ mod tests {
                     detail: "path suggests source-like file role".to_string(),
                 },
             ],
+            symbols: vec![],
         };
         let guide = FileCandidate {
             path: "GUIDE.md".to_string(),
@@ -1085,6 +1087,7 @@ mod tests {
                     detail: "cosine 0.850 (BAAI/bge-small-en-v1.5)".to_string(),
                 },
             ],
+            symbols: vec![],
         };
 
         let mut candidates = vec![guide, source];
@@ -1118,6 +1121,7 @@ mod tests {
                 evidence_type: "semantic_match".to_string(),
                 detail: "cosine 0.850 (BAAI/bge-small-en-v1.5)".to_string(),
             }],
+            symbols: vec![],
         };
         let source = FileCandidate {
             path: "src/rank.rs".to_string(),
@@ -1138,6 +1142,7 @@ mod tests {
                     detail: "matched on lines 42".to_string(),
                 },
             ],
+            symbols: vec![],
         };
 
         let mut candidates = vec![doc, source];
@@ -1178,6 +1183,7 @@ mod tests {
                     detail: "path suggests source-like file role".to_string(),
                 },
             ],
+            symbols: vec![],
         };
         let guide = FileCandidate {
             path: "GUIDE.md".to_string(),
@@ -1198,6 +1204,7 @@ mod tests {
                     detail: "cosine 0.850 (BAAI/bge-small-en-v1.5)".to_string(),
                 },
             ],
+            symbols: vec![],
         };
 
         // GUIDE.md sorts first alphabetically at equal scores; guard must fix this.
@@ -1224,3 +1231,7 @@ mod tests {
         dir
     }
 }
+
+
+
+

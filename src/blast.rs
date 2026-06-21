@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+﻿use anyhow::{anyhow, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -1321,7 +1321,8 @@ mod tests {
             visibility: crate::types::Visibility::Public,
             signature: Some(signature),
             end_line: None,
-        }
+
+            parent_class: None,        }
     }
 
     fn loaded_index() -> index::LoadedIndex {

@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+﻿use anyhow::{anyhow, Result};
 use std::collections::BTreeMap;
 
 use crate::index::{
@@ -237,6 +237,37 @@ fn match_symbols<'a>(
     symbols: &'a [IndexedSymbol],
     query: &str,
 ) -> (SymbolMatchMode, Vec<&'a IndexedSymbol>) {
+    // Dotted query: "ClassName.method" — match symbols with name==method AND parent_class==ClassName.
+    if let Some((class_part, method_part)) = query.split_once('.') {
+        if !class_part.is_empty() && !method_part.is_empty() {
+            let mut dotted = symbols
+                .iter()
+                .filter(|s| {
+                    s.name.eq_ignore_ascii_case(method_part)
+                        && s.parent_class
+                            .as_deref()
+                            .map(|c| c.eq_ignore_ascii_case(class_part))
+                            .unwrap_or(false)
+                })
+                .collect::<Vec<_>>();
+            sort_symbols(&mut dotted);
+            if !dotted.is_empty() {
+                return (SymbolMatchMode::Exact, dotted);
+            }
+            // Nothing matched dotted — fall through to bare-method substring search
+            let method_lower = method_part.to_lowercase();
+            let mut bare = symbols
+                .iter()
+                .filter(|s| s.name.to_lowercase().contains(&method_lower))
+                .collect::<Vec<_>>();
+            sort_symbols(&mut bare);
+            if !bare.is_empty() {
+                return (SymbolMatchMode::Substring, bare);
+            }
+            return (SymbolMatchMode::None, Vec::new());
+        }
+    }
+
     let mut exact = symbols
         .iter()
         .filter(|symbol| symbol.name == query)
@@ -624,7 +655,8 @@ mod tests {
             visibility: crate::types::Visibility::Public,
             signature: Some(format!("pub fn {name}()")),
             end_line: None,
-        }
+
+            parent_class: None,        }
     }
 
     #[test]
@@ -819,7 +851,8 @@ mod tests {
             visibility: crate::types::Visibility::Public,
             signature: Some("pub struct SearchResult {".to_string()),
             end_line: None,
-        };
+
+            parent_class: None,        };
 
         let references = collect_used_by(&index, &symbol);
         assert_eq!(references.len(), 2);
@@ -857,7 +890,8 @@ mod tests {
                 visibility: crate::types::Visibility::Public,
                 signature: Some("class LLMClient:".to_string()),
                 end_line: None,
-            }],
+
+            parent_class: None,            }],
             symbol_references: vec![crate::index::IndexedSymbolReference {
                 from_file: "app/meeting_session.py".to_string(),
                 symbol_name: "LLMClient".to_string(),
@@ -888,7 +922,8 @@ mod tests {
             visibility: crate::types::Visibility::Public,
             signature: Some("class LLMClient:".to_string()),
             end_line: None,
-        };
+
+            parent_class: None,        };
 
         let references = collect_used_by(&index, &symbol);
         assert_eq!(references.len(), 1);

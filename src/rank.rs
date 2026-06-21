@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+﻿use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -9,7 +9,7 @@ use crate::text::{
 };
 use crate::types::{
     Confidence, DetailLevel, Evidence, FileCandidate, IndexedSymbol, LineRange, SearchMatch,
-    Snippet,
+    Snippet, SymbolSummary,
 };
 
 pub const CANDIDATE_LIMIT: usize = 8;
@@ -51,7 +51,9 @@ impl ScoreBudget {
         let shape = self.filename_shape.clamp(0.0, 0.40);
         let lex = self.lexical.clamp(0.0, 0.20);
         let ph = self.phrase.clamp(-0.30, 0.18);
-        let sym = self.symbol_def.clamp(0.0, 0.25);
+        // Raised from 0.25 → 0.35 so that 2 exact symbol definitions (0.22×2=0.44)
+        // score clearly higher than 1 (0.22) and cap isn't hit by a single match.
+        let sym = self.symbol_def.clamp(0.0, 0.35);
         let rf = self.reference.clamp(0.0, 0.08);
         let role = self.role.clamp(-0.15, 0.08);
         (shape + lex + ph + sym + rf + role).clamp(0.0, 1.0)
@@ -80,6 +82,8 @@ pub struct FindFilters {
     exclude: GlobMatcherSet,
     role: FindRoleFilter,
     match_mode: FindMatchFilter,
+    /// When true, hard-exclude doc, lockfile, and generated files regardless of score.
+    pub exclude_docs: bool,
 }
 
 impl FindFilters {
@@ -94,6 +98,7 @@ impl FindFilters {
             exclude: build_globset(exclude, "exclude")?,
             role,
             match_mode,
+            exclude_docs: false,
         })
     }
 
@@ -103,6 +108,11 @@ impl FindFilters {
             return false;
         }
         if !self.exclude.is_empty() && self.exclude.is_match(&normalized_path) {
+            return false;
+        }
+        if self.exclude_docs
+            && matches!(role, "doc" | "lockfile" | "generated")
+        {
             return false;
         }
         role_matches(self.role, role)
@@ -116,6 +126,7 @@ impl Default for FindFilters {
             exclude: GlobMatcherSet::empty(),
             role: FindRoleFilter::Any,
             match_mode: FindMatchFilter::Any,
+            exclude_docs: false,
         }
     }
 }
@@ -293,6 +304,25 @@ pub fn apply_tiered_density(candidates: &mut Vec<FileCandidate>) {
             }
         }
     }
+}
+
+/// Build a deduplicated vocabulary list from the top candidates' symbol names.
+/// Returns the top N unique symbol names that matched the query, ordered by
+/// their rank position (earlier-ranked candidates contribute first).
+pub fn build_vocabulary(candidates: &[FileCandidate], limit: usize) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut vocab = Vec::new();
+    for candidate in candidates.iter().take(CANDIDATE_LIMIT) {
+        for sym in &candidate.symbols {
+            if seen.insert(sym.name.clone()) {
+                vocab.push(sym.name.clone());
+                if vocab.len() >= limit {
+                    return vocab;
+                }
+            }
+        }
+    }
+    vocab
 }
 
 pub fn next_actions(_query: &str, candidates: &[FileCandidate], repo_root: &str) -> Vec<String> {
@@ -496,12 +526,19 @@ fn build_candidate(
     }
 
     if !profile.terms.is_empty() && !matched_terms.is_empty() {
-        let matched_term_count = matched_terms.len() as f64;
-        let missing_terms = profile.terms.len().saturating_sub(matched_terms.len()) as f64;
-        budget.lexical += matched_term_count * 0.07;
-        if missing_terms > 0.0 {
-            budget.lexical -= missing_terms * 0.04;
-        }
+        // Ratio-squared coverage: rewards files that match ALL query terms over files
+        // that match most. For a 4-term query: 1/4→0.010, 2/4→0.040, 3/4→0.089,
+        // 4/4→0.174 (+ 0.026 full-coverage bonus = 0.200 max, still within lex cap).
+        let total_terms = profile.terms.len() as f64;
+        let matched_count = matched_terms.len() as f64;
+        let ratio = matched_count / total_terms;
+        let coverage_score = ratio * ratio * 0.17;
+        let full_bonus = if matched_terms.len() == profile.terms.len() {
+            0.03
+        } else {
+            0.0
+        };
+        budget.lexical += coverage_score + full_bonus;
         evidence.push(Evidence {
             evidence_type: "query_term_coverage".to_string(),
             detail: format!(
@@ -524,7 +561,38 @@ fn build_candidate(
     let mut seen_evidence = std::collections::BTreeSet::new();
     evidence.retain(|e| seen_evidence.insert((e.evidence_type.clone(), e.detail.clone())));
 
-    let raw_score = budget.total();
+    // God-file dampening: very large files mention every concept and dominate via BM25
+    // even when a focused smaller file is the real answer.  Files >3× the repo median
+    // get a proportional score discount so they don't crowd out targeted files.
+    let size_dampen = if let Some(idx) = index {
+        if let Some(file) = idx.files.iter().find(|f| f.path == normalized_path) {
+            if let Some(lex_stats) = file.lex_stats.as_ref() {
+                let avg = idx.stats.avg_doc_length;
+                if avg > 0.0 {
+                    let ratio = lex_stats.doc_length as f64 / avg;
+                    if ratio > 10.0 {
+                        0.72
+                    } else if ratio > 5.0 {
+                        0.83
+                    } else if ratio > 3.0 {
+                        0.91
+                    } else {
+                        1.0
+                    }
+                } else {
+                    1.0
+                }
+            } else {
+                1.0
+            }
+        } else {
+            1.0
+        }
+    } else {
+        1.0
+    };
+
+    let raw_score = (budget.total() * size_dampen).clamp(0.0, 1.0);
     let score = round_score(raw_score);
     let confidence = confidence_for(
         &role,
@@ -534,6 +602,25 @@ fn build_candidate(
         matched_terms.len(),
         &snippets,
     );
+
+    // Collect query-matching symbols defined in this file for the `symbols` field.
+    let candidate_symbols: Vec<SymbolSummary> = index
+        .map(|idx| {
+            idx.symbols
+                .iter()
+                .filter(|s| {
+                    s.file_path == normalized_path
+                        && symbol_match_strength(&s.name, profile).is_some()
+                })
+                .map(|s| SymbolSummary {
+                    name: s.name.clone(),
+                    kind: s.kind.to_string(),
+                    line: s.line_number,
+                    parent_class: s.parent_class.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     RankedCandidate {
         candidate: FileCandidate {
@@ -546,6 +633,7 @@ fn build_candidate(
             line_ranges: compress_line_ranges(&matches),
             snippets,
             evidence,
+            symbols: candidate_symbols,
         },
         tier: index_tier,
         matched_terms: matched_terms.len(),
@@ -1052,22 +1140,31 @@ fn symbol_definition_signal(
     scale: f64,
 ) -> Option<IndexSignal> {
     let strength = symbol_match_strength(&symbol.name, profile)?;
+    // Base values are intentionally below the sym_def cap (0.35) so that a file
+    // with 2 exact definitions clearly outscores a file with 1, and so that a
+    // focused filename-match file (shape=0.40) outranks a symbol-hub file with
+    // only 1 exact definition (sym_def≤0.18).
+    //
+    // Exact Source identifier: 0.14+0.03=0.17  → 2 defs=0.34, capped at 0.35
+    // Exact Source non-id:     0.13+0.03=0.16  → 2 defs=0.32, capped at 0.35
+    // Strong:  0.07 → multiple needed to approach cap
+    // Loose:   0.04 → even 5 Loose only reach 0.20
     let (base, tier, confidence) = match strength {
         SymbolMatchStrength::Exact => {
             let base = match role {
                 FileRole::Source => {
                     if profile.identifier_like {
-                        0.68
+                        0.14
                     } else {
-                        0.44
+                        0.13
                     }
                 }
-                FileRole::Doc => 0.32,
-                FileRole::Test => 0.44,
-                FileRole::Config => 0.36,
-                FileRole::Lockfile => 0.16,
-                FileRole::Generated => 0.06,
-                FileRole::Other => 0.40,
+                FileRole::Doc => 0.08,
+                FileRole::Test => 0.10,
+                FileRole::Config => 0.09,
+                FileRole::Lockfile => 0.04,
+                FileRole::Generated => 0.02,
+                FileRole::Other => 0.10,
             };
             let tier = if matches!(role, FileRole::Source) {
                 5
@@ -1076,8 +1173,8 @@ fn symbol_definition_signal(
             };
             (base, tier, Confidence::High)
         }
-        SymbolMatchStrength::Strong => (0.28, 3, Confidence::Medium),
-        SymbolMatchStrength::Loose => (0.14, 2, Confidence::Low),
+        SymbolMatchStrength::Strong => (0.07, 3, Confidence::Medium),
+        SymbolMatchStrength::Loose => (0.04, 2, Confidence::Low),
     };
     let mut score = base * scale;
 
@@ -1085,8 +1182,9 @@ fn symbol_definition_signal(
         return None;
     }
 
+    // Source-file bonus for exact definitions
     if matches!(strength, SymbolMatchStrength::Exact) && matches!(role, FileRole::Source) {
-        score += 0.10 * scale;
+        score += 0.03 * scale;
     }
 
     Some(IndexSignal {
@@ -1101,6 +1199,13 @@ fn symbol_definition_signal(
 }
 
 fn symbol_reference_signal(reference: &IndexedSymbolReference, scale: f64) -> Option<IndexSignal> {
+    // Call-site references (target_file=None, confidence=Inferred) are stored for
+    // used_by display but must NOT influence ranking — they match any symbol with
+    // that name in the repo and would boost every calling file, not just relevant ones.
+    if reference.target_file.is_none() && reference.confidence == EdgeConfidence::Inferred {
+        return None;
+    }
+
     let (base, tier) = match reference.context {
         ReferenceContext::Production => (0.16, 2),
         ReferenceContext::Fixture => (0.04, 1),
@@ -1913,7 +2018,8 @@ mod tests {
             visibility: crate::types::Visibility::Public,
             signature: Some(format!("pub struct {name} {{")),
             end_line: None,
-        }
+
+            parent_class: None,        }
     }
 
     fn indexed_file(path: &str, role: IndexFileRole) -> IndexedFile {
@@ -2777,7 +2883,8 @@ mod tests {
                 visibility: crate::types::Visibility::Public,
                 signature: Some("pub struct DownloadProgress {".to_string()),
                 end_line: None,
-            }],
+
+            parent_class: None,            }],
             symbol_references: vec![],
             edges: vec![],
             stats: IndexStats {

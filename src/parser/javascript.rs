@@ -151,6 +151,9 @@ fn walk_js_node(
                 );
                 sym.end_line = Some(node.end_position().row + 1);
                 facts.symbols.push(sym);
+                if let Some(body) = node.child_by_field_name("body") {
+                    walk_js_class_body(body, name, file_path, source, facts);
+                }
             }
         }
         "lexical_declaration" | "variable_declaration" => {
@@ -174,6 +177,44 @@ fn walk_js_node(
         _ => {
             for child in named_children(node) {
                 walk_js_node(child, file_path, source, lookup, exported, facts);
+            }
+        }
+    }
+}
+
+fn walk_js_class_body(
+    node: Node,
+    class_name: &str,
+    file_path: &str,
+    source: &str,
+    facts: &mut FileFacts,
+) {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() == "method_definition" {
+            if let Some(name) = child
+                .child_by_field_name("name")
+                .and_then(|n| n.utf8_text(source.as_bytes()).ok())
+            {
+                if name == "constructor" {
+                    continue;
+                }
+                let vis = if name.starts_with('_') || name.starts_with('#') {
+                    Visibility::Private
+                } else {
+                    Visibility::Public
+                };
+                let mut sym = symbol(
+                    name.to_string(),
+                    SymbolKind::Function,
+                    file_path,
+                    child.start_position().row + 1,
+                    vis,
+                    symbol_signature(source, child.start_position().row + 1, 120),
+                );
+                sym.end_line = Some(child.end_position().row + 1);
+                sym.parent_class = Some(class_name.to_string());
+                facts.symbols.push(sym);
             }
         }
     }

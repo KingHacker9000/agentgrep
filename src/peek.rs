@@ -26,6 +26,8 @@ pub struct BodyLine {
 pub fn peek_symbol(
     symbol_name: &str,
     file_hint: Option<&str>,
+    line_hint: Option<usize>,
+    context: usize,
     index: &RepoIndex,
     repo_root: &str,
 ) -> Result<PeekReport> {
@@ -43,18 +45,50 @@ pub fn peek_symbol(
     }
 
     let sym = if let Some(hint) = file_hint {
+        let file_matches: Vec<_> = matches
+            .iter()
+            .filter(|s| s.file_path.contains(hint))
+            .copied()
+            .collect();
+        if file_matches.is_empty() {
+            bail!(
+                "symbol '{}' not found in files matching '{}'; found in: {}",
+                symbol_name,
+                hint,
+                matches
+                    .iter()
+                    .map(|s| s.file_path.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        if let Some(ln) = line_hint {
+            file_matches
+                .iter()
+                .find(|s| s.line_number == ln)
+                .copied()
+                .with_context(|| {
+                    format!(
+                        "symbol '{}' not found at line {} in files matching '{}'",
+                        symbol_name, ln, hint
+                    )
+                })?
+        } else {
+            file_matches[0]
+        }
+    } else if let Some(ln) = line_hint {
         matches
             .iter()
-            .find(|s| s.file_path.contains(hint))
+            .find(|s| s.line_number == ln)
             .copied()
             .with_context(|| {
                 format!(
-                    "symbol '{}' not found in files matching '{}'; found in: {}",
+                    "symbol '{}' not found at line {}; found at lines: {}",
                     symbol_name,
-                    hint,
+                    ln,
                     matches
                         .iter()
-                        .map(|s| s.file_path.as_str())
+                        .map(|s| s.line_number.to_string())
                         .collect::<Vec<_>>()
                         .join(", ")
                 )
@@ -83,14 +117,20 @@ pub fn peek_symbol(
     let source = std::fs::read_to_string(&abs_path)
         .with_context(|| format!("could not read {}", abs_path.display()))?;
 
-    let start_line = sym.line_number.saturating_sub(1); // 0-based
-    let end_inclusive = end_line.min(source.lines().count()); // 1-based, inclusive
+    let total_lines = source.lines().count();
+    // Symbol body bounds (0-based start, 1-based inclusive end)
+    let sym_start_0 = sym.line_number.saturating_sub(1);
+    let sym_end_1 = end_line.min(total_lines);
+
+    // Context expands the window but never moves the symbol boundary markers.
+    let read_start_0 = sym_start_0.saturating_sub(context);
+    let read_end_1 = (sym_end_1 + context).min(total_lines);
 
     let body: Vec<BodyLine> = source
         .lines()
         .enumerate()
-        .skip(start_line)
-        .take(end_inclusive.saturating_sub(start_line))
+        .skip(read_start_0)
+        .take(read_end_1.saturating_sub(read_start_0))
         .map(|(i, text)| BodyLine {
             line: i + 1,
             text: text.to_string(),

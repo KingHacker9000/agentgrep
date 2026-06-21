@@ -1,5 +1,6 @@
 mod blast;
 mod cli;
+mod files;
 mod index;
 mod map;
 mod output;
@@ -12,6 +13,7 @@ mod search;
 mod semantic;
 mod symbol;
 mod text;
+mod trace;
 mod types;
 
 use anyhow::Result;
@@ -35,6 +37,8 @@ fn run() -> Result<()> {
             role,
             match_mode,
             semantic,
+            exclude_docs,
+            brief,
             json,
         } => {
             let started = std::time::Instant::now();
@@ -59,7 +63,9 @@ fn run() -> Result<()> {
                 cli::FindMatchSelection::Any => rank::FindMatchFilter::Any,
                 cli::FindMatchSelection::All => rank::FindMatchFilter::All,
             };
-            let filters = rank::FindFilters::try_new(include, exclude, role_filter, match_filter)?;
+            let mut filters =
+                rank::FindFilters::try_new(include, exclude, role_filter, match_filter)?;
+            filters.exclude_docs = exclude_docs;
             let det_candidates = rank::rank_with_index(
                 &query,
                 search.matches,
@@ -76,6 +82,10 @@ fn run() -> Result<()> {
             };
 
             let mut candidates = candidates;
+
+            // Build vocabulary from symbols before tiered density strips them.
+            let vocabulary = rank::build_vocabulary(&candidates, 12);
+
             rank::apply_tiered_density(&mut candidates);
 
             let next_actions =
@@ -86,6 +96,32 @@ fn run() -> Result<()> {
             coverage.limited |= search.match_limit_hit;
             coverage.semantic_status = semantic_status;
 
+            // Vocabulary mismatch: top score below 0.30 and no strong evidence found.
+            let mismatch_note = {
+                let top_score = candidates.first().map(|c| c.score).unwrap_or(0.0);
+                let has_strong_signal = candidates.iter().any(|c| {
+                    c.evidence.iter().any(|e| {
+                        matches!(
+                            e.evidence_type.as_str(),
+                            "exact_phrase_match"
+                                | "near_phrase_match"
+                                | "indexed_symbol_definition"
+                                | "indexed_symbol_reference"
+                        )
+                    })
+                });
+                if top_score < 0.30 && !has_strong_signal && !candidates.is_empty() {
+                    candidates.truncate(5);
+                    Some(
+                        "Low-confidence results: query terms may not match codebase vocabulary. \
+                         Try rephrasing with identifiers from the codebase, or use `rg` for raw search."
+                            .to_string(),
+                    )
+                } else {
+                    None
+                }
+            };
+
             let report = types::FindReport {
                 query,
                 repo_root: repo::display_path(&repo.root),
@@ -94,8 +130,10 @@ fn run() -> Result<()> {
                 coverage,
                 candidates,
                 next_actions,
+                note: mismatch_note,
+                vocabulary,
             };
-            output::write_find_report(&report, json)?;
+            output::write_find_report(&report, json, brief)?;
         }
         cli::Commands::Index {
             status,
@@ -140,7 +178,13 @@ fn run() -> Result<()> {
             let report = blast::build_report(&repo, &query)?;
             blast::write_report(&report, json)?;
         }
-        cli::Commands::Peek { symbol, file, json } => {
+        cli::Commands::Peek {
+            symbol,
+            file,
+            line,
+            context,
+            json,
+        } => {
             let repo = repo::discover()?;
             let loaded = index::load(&repo)?;
             let Some(index) = loaded.index.as_ref() else {
@@ -148,19 +192,51 @@ fn run() -> Result<()> {
                     "no index found — run `agentgrep index` first to enable peek"
                 );
             };
-            let report = peek::peek_symbol(&symbol, file.as_deref(), index, &repo::display_path(&repo.root))?;
+            let report = peek::peek_symbol(
+                &symbol,
+                file.as_deref(),
+                line,
+                context,
+                index,
+                &repo::display_path(&repo.root),
+            )?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
-                println!("{}  {}:{}-{}", report.kind, report.file_path, report.line_number, report.end_line);
+                println!(
+                    "{}  {}:{}-{}",
+                    report.kind, report.file_path, report.line_number, report.end_line
+                );
                 if let Some(sig) = &report.signature {
                     println!("{sig}");
                 }
                 println!();
-                for line in &report.body {
-                    println!("{:4}  {}", line.line, line.text);
+                for ln in &report.body {
+                    println!("{:4}  {}", ln.line, ln.text);
                 }
             }
+        }
+        cli::Commands::Files { pattern, json } => {
+            let repo = repo::discover()?;
+            let loaded = index::load(&repo)?;
+            let Some(index) = loaded.index.as_ref() else {
+                anyhow::bail!(
+                    "no index found — run `agentgrep index` first to enable files"
+                );
+            };
+            let report = files::build_report(&repo, &pattern, index)?;
+            files::write_report(&report, json)?;
+        }
+        cli::Commands::Trace { symbol, json } => {
+            let repo = repo::discover()?;
+            let loaded = index::load(&repo)?;
+            let Some(index) = loaded.index.as_ref() else {
+                anyhow::bail!(
+                    "no index found — run `agentgrep index` first to enable trace"
+                );
+            };
+            let report = trace::build_report(&symbol, index)?;
+            trace::write_report(&report, json)?;
         }
         cli::Commands::Semantic { action } => {
             let repo = repo::discover()?;

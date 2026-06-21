@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+﻿use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize)]
@@ -10,6 +10,23 @@ pub struct FindReport {
     pub coverage: SearchCoverage,
     pub candidates: Vec<FileCandidate>,
     pub next_actions: Vec<String>,
+    /// Present when results are low-confidence and the query may need reformulation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Codebase vocabulary: top matching symbol names surfaced from the index.
+    /// Helps agents learn the exact identifiers used in this repo for the query concept.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vocabulary: Vec<String>,
+}
+
+/// A compact symbol reference attached to a find candidate.
+#[derive(Debug, Clone, Serialize)]
+pub struct SymbolSummary {
+    pub name: String,
+    pub kind: String,
+    pub line: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_class: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -23,6 +40,9 @@ pub struct FileCandidate {
     pub line_ranges: Vec<LineRange>,
     pub snippets: Vec<Snippet>,
     pub evidence: Vec<Evidence>,
+    /// Index-matched symbols in this file relevant to the query.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub symbols: Vec<SymbolSummary>,
 }
 
 /// Controls how much per-candidate data is included in the output.
@@ -119,6 +139,51 @@ impl SearchCoverage {
         self.limited = displayed_candidate_count < self.raw_candidate_file_count;
         self
     }
+}
+
+/// Report for `agentgrep files <pattern>` — confirmed file paths from the index.
+#[derive(Debug, Clone, Serialize)]
+pub struct FilesReport {
+    pub pattern: String,
+    pub repo_root: String,
+    pub total_indexed: usize,
+    pub matches: Vec<FileMatch>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FileMatch {
+    pub path: String,
+    pub role: String,
+}
+
+/// Report for `agentgrep trace <symbol>` — caller/callee graph.
+#[derive(Debug, Clone, Serialize)]
+pub struct TraceReport {
+    pub symbol: String,
+    pub index_status: String,
+    pub defined_in: Vec<TraceDefinition>,
+    pub callers: Vec<TraceCallSite>,
+    pub callees: Vec<TraceCallSite>,
+    pub next_actions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TraceDefinition {
+    pub file: String,
+    pub line: usize,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_class: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TraceCallSite {
+    pub file: String,
+    pub line: usize,
+    pub context: String,
+    pub confidence: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -385,6 +450,9 @@ pub struct IndexedSymbol {
     /// Last line of the symbol's body (from tree-sitter extent). None for old indexes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_line: Option<usize>,
+    /// For class methods: the name of the enclosing class. Enables `symbol "ClassName.method"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_class: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -409,7 +477,8 @@ mod tests {
             visibility: Visibility::Public,
             signature: Some(format!("pub fn {name}()")),
             end_line: None,
-        }
+
+            parent_class: None,        }
     }
 
     fn sample_reference(
@@ -499,8 +568,11 @@ mod tests {
                     evidence_type: "rg_match".to_string(),
                     detail: "matched SearchResult".to_string(),
                 }],
+                symbols: vec![],
             }],
             next_actions: vec!["agentgrep map src/search.rs".to_string()],
+            note: None,
+            vocabulary: vec![],
         };
 
         let json = serde_json::to_value(&report).unwrap();

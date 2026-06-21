@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+﻿use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -19,7 +19,7 @@ use crate::text::shorten_snippet;
 use crate::types::{IndexedSymbol, SymbolKind, Visibility};
 use serde_json::Value;
 
-pub const INDEX_SCHEMA_VERSION: u32 = 7;
+pub const INDEX_SCHEMA_VERSION: u32 = 8;
 pub const HASH_LIMIT_BYTES: u64 = 1024 * 256;
 pub const MAX_LEX_TERMS: usize = 300;
 const LEX_READ_SIZE_LIMIT: u64 = HASH_LIMIT_BYTES;
@@ -1486,6 +1486,7 @@ fn symbol_record(
         visibility,
         signature,
         end_line: None,
+        parent_class: None,
     }
 }
 
@@ -2871,7 +2872,8 @@ mod tests {
                 visibility: Visibility::Public,
                 signature: Some("pub struct SearchMatch {}".to_string()),
                 end_line: None,
-            },
+
+            parent_class: None,            },
             IndexedSymbol {
                 name: "run".to_string(),
                 kind: SymbolKind::Function,
@@ -2880,7 +2882,8 @@ mod tests {
                 visibility: Visibility::Private,
                 signature: Some("fn run() {".to_string()),
                 end_line: None,
-            },
+
+            parent_class: None,            },
         ];
 
         let references = build_rust_symbol_references(&files, &texts, &symbols);
@@ -2923,7 +2926,8 @@ mod tests {
                 visibility: Visibility::Public,
                 signature: Some("pub struct Helper {}".to_string()),
                 end_line: None,
-            },
+
+            parent_class: None,            },
             IndexedSymbol {
                 name: "Helper".to_string(),
                 kind: SymbolKind::Struct,
@@ -2932,7 +2936,8 @@ mod tests {
                 visibility: Visibility::Public,
                 signature: Some("pub struct Helper {}".to_string()),
                 end_line: None,
-            },
+
+            parent_class: None,            },
         ];
 
         let references = build_rust_symbol_references(&files, &texts, &symbols);
@@ -2958,7 +2963,8 @@ mod tests {
             visibility: Visibility::Public,
             signature: Some("pub struct SearchResult {}".to_string()),
             end_line: None,
-        }];
+
+            parent_class: None,        }];
 
         let references = build_rust_symbol_references(&files, &texts, &symbols);
         assert_eq!(references.len(), 1);
@@ -2985,7 +2991,8 @@ mod tests {
             visibility: Visibility::Public,
             signature: Some("pub struct SearchResult {}".to_string()),
             end_line: None,
-        }];
+
+            parent_class: None,        }];
 
         let references = build_rust_symbol_references(&files, &texts, &symbols);
         assert_eq!(references.len(), 1);
@@ -3012,7 +3019,8 @@ mod tests {
                 visibility: Visibility::Public,
                 signature: Some("pub struct SearchCoverage {}".to_string()),
                 end_line: None,
-            },
+
+            parent_class: None,            },
             IndexedSymbol {
                 name: "SearchCoverage".to_string(),
                 kind: SymbolKind::Impl,
@@ -3021,7 +3029,8 @@ mod tests {
                 visibility: Visibility::Private,
                 signature: Some("impl SearchCoverage {".to_string()),
                 end_line: None,
-            },
+
+            parent_class: None,            },
         ];
 
         let references = build_rust_symbol_references(&files, &texts, &symbols);
@@ -3122,7 +3131,8 @@ mod tests {
                 visibility: Visibility::Public,
                 signature: Some("pub fn main()".to_string()),
                 end_line: None,
-            }],
+
+            parent_class: None,            }],
             symbol_references: vec![],
             edges: vec![IndexedEdge {
                 edge_type: "same_area".to_string(),

@@ -2,11 +2,15 @@ use anyhow::Result;
 
 use crate::types::FindReport;
 
-pub fn write_find_report(report: &FindReport, json: bool) -> Result<()> {
+pub fn write_find_report(report: &FindReport, json: bool, brief: bool) -> Result<()> {
     if json {
         let rendered = serde_json::to_string_pretty(report)?;
         println!("{rendered}");
         return Ok(());
+    }
+
+    if brief {
+        return write_find_brief(report);
     }
 
     if report.candidates.is_empty() {
@@ -32,7 +36,21 @@ pub fn write_find_report(report: &FindReport, json: bool) -> Result<()> {
                 println!("   - {}: {}", snippet.line_number, snippet.text);
             }
         }
+        if !candidate.symbols.is_empty() {
+            let sym_strs: Vec<String> = candidate
+                .symbols
+                .iter()
+                .take(5)
+                .map(|s| format!("{}:{}", s.name, s.line))
+                .collect();
+            println!("   Symbols: {}", sym_strs.join(", "));
+        }
         println!("   Why: {}", explain(candidate));
+        println!();
+    }
+
+    if !report.vocabulary.is_empty() {
+        println!("Vocabulary: {}", report.vocabulary.join(", "));
         println!();
     }
 
@@ -41,6 +59,11 @@ pub fn write_find_report(report: &FindReport, json: bool) -> Result<()> {
         for action in &report.next_actions {
             println!("- {action}");
         }
+        println!();
+    }
+
+    if let Some(note) = &report.note {
+        println!("Note: {note}");
         println!();
     }
 
@@ -73,6 +96,29 @@ pub fn write_find_report(report: &FindReport, json: bool) -> Result<()> {
     );
     println!("- index status: {}", report.coverage.index_status);
 
+    Ok(())
+}
+
+/// Compact one-line-per-candidate output for agent pipelines.
+/// Format: path:line:SymbolName  [score conf role]
+fn write_find_brief(report: &FindReport) -> Result<()> {
+    if report.candidates.is_empty() {
+        println!("(no matches)");
+        return Ok(());
+    }
+    for c in &report.candidates {
+        let loc = if let Some(sym) = c.symbols.first() {
+            format!("{}:{}:{}", c.path, sym.line, sym.name)
+        } else if let Some(lr) = c.line_ranges.first() {
+            format!("{}:{}", c.path, lr.start)
+        } else {
+            c.path.clone()
+        };
+        println!("{loc}  [{:.2} {} {}]", c.score, c.confidence, c.role);
+    }
+    if !report.vocabulary.is_empty() {
+        println!("vocab: {}", report.vocabulary.join(", "));
+    }
     Ok(())
 }
 

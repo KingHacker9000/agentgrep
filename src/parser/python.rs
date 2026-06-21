@@ -110,7 +110,7 @@ fn walk_python_node(
                 sym.end_line = Some(node.end_position().row + 1);
                 facts.symbols.push(sym);
                 if let Some(body) = node.child_by_field_name("body") {
-                    walk_python_class_body(body, file_path, source, facts);
+                    walk_python_class_body(body, name, file_path, source, lookup, facts);
                 }
             }
         }
@@ -190,8 +190,10 @@ fn extract_python_call_site(node: Node, file_path: &str, source: &str, facts: &m
 
 fn walk_python_class_body(
     node: Node,
+    class_name: &str,
     file_path: &str,
     source: &str,
+    lookup: &RepoLookup,
     facts: &mut FileFacts,
 ) {
     let mut cursor = node.walk();
@@ -211,7 +213,14 @@ fn walk_python_class_body(
                         symbol_signature(source, child.start_position().row + 1, 120),
                     );
                     sym.end_line = Some(child.end_position().row + 1);
+                    sym.parent_class = Some(class_name.to_string());
                     facts.symbols.push(sym);
+                }
+                // Walk body for call sites
+                if let Some(body) = child.child_by_field_name("body") {
+                    for sub in named_children(body) {
+                        walk_python_node(sub, file_path, source, lookup, facts);
+                    }
                 }
             }
             "decorated_definition" => {
@@ -232,7 +241,14 @@ fn walk_python_class_body(
                                 symbol_signature(source, inner.start_position().row + 1, 120),
                             );
                             sym.end_line = Some(inner.end_position().row + 1);
+                            sym.parent_class = Some(class_name.to_string());
                             facts.symbols.push(sym);
+                        }
+                        // Walk body for call sites
+                        if let Some(body) = inner.child_by_field_name("body") {
+                            for sub in named_children(body) {
+                                walk_python_node(sub, file_path, source, lookup, facts);
+                            }
                         }
                     }
                 }
@@ -254,7 +270,7 @@ fn walk_python_class_body(
                     sym.end_line = Some(child.end_position().row + 1);
                     facts.symbols.push(sym);
                     if let Some(body) = child.child_by_field_name("body") {
-                        walk_python_class_body(body, file_path, source, facts);
+                        walk_python_class_body(body, name, file_path, source, lookup, facts);
                     }
                 }
             }

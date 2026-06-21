@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+﻿use anyhow::{anyhow, Result};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::index::{
@@ -1114,7 +1114,8 @@ mod tests {
                         visibility: crate::types::Visibility::Public,
                         signature: Some("pub struct SearchResult {".to_string()),
                         end_line: None,
-                    },
+
+            parent_class: None,                    },
                     crate::types::IndexedSymbol {
                         name: "FindReport".to_string(),
                         kind: crate::types::SymbolKind::Struct,
@@ -1123,7 +1124,8 @@ mod tests {
                         visibility: crate::types::Visibility::Public,
                         signature: Some("pub struct FindReport {".to_string()),
                         end_line: None,
-                    },
+
+            parent_class: None,                    },
                     crate::types::IndexedSymbol {
                         name: "SearchCoverage".to_string(),
                         kind: crate::types::SymbolKind::Struct,
@@ -1132,7 +1134,8 @@ mod tests {
                         visibility: crate::types::Visibility::Public,
                         signature: Some("pub struct SearchCoverage {".to_string()),
                         end_line: None,
-                    },
+
+            parent_class: None,                    },
                     crate::types::IndexedSymbol {
                         name: "SearchCoverage".to_string(),
                         kind: crate::types::SymbolKind::Impl,
@@ -1141,7 +1144,8 @@ mod tests {
                         visibility: crate::types::Visibility::Private,
                         signature: Some("impl SearchCoverage {".to_string()),
                         end_line: None,
-                    },
+
+            parent_class: None,                    },
                 ],
                 symbol_references: vec![
                     IndexedSymbolReference {

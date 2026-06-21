@@ -56,6 +56,7 @@ pub fn symbol(
         visibility,
         signature,
         end_line: None,
+        parent_class: None,
     }
 }
 
@@ -76,6 +77,7 @@ pub fn symbol_with_extent(
         visibility,
         signature,
         end_line: Some(end_line),
+        parent_class: None,
     }
 }
 
