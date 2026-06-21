@@ -1,6 +1,7 @@
 mod blast;
 mod cli;
 mod dep_resolve;
+mod overview;
 mod files;
 mod index;
 mod map;
@@ -238,6 +239,17 @@ fn run() -> Result<()> {
             };
             let report = trace::build_report(&symbol, index, &repo.root)?;
             trace::write_report(&report, json)?;
+        }
+        cli::Commands::Overview { full, min_refs, only, json } => {
+            let repo = repo::discover()?;
+            let loaded = index::load(&repo)?;
+            let Some(index) = loaded.index.as_ref() else {
+                anyhow::bail!(
+                    "no index found — run `agentgrep index` first to enable overview"
+                );
+            };
+            let report = overview::build_report(index, full, min_refs, &only)?;
+            overview::write_report(&report, json)?;
         }
         cli::Commands::Semantic { action } => {
             let repo = repo::discover()?;

@@ -201,6 +201,49 @@ pub struct TraceCallSite {
     pub confidence: String,
 }
 
+/// Report for `agentgrep overview` — lightweight codebase orientation.
+#[derive(Debug, Clone, Serialize)]
+pub struct OverviewReport {
+    pub repo_root: String,
+    pub languages: Vec<String>,
+    pub file_count: usize,
+    pub symbol_count: usize,
+    pub entry_points: Vec<String>,
+    /// Top-level source directories grouped by path prefix, with file counts.
+    pub packages: Vec<PackageGroup>,
+    /// Public structs / enums / traits / classes / interfaces (always shown).
+    pub key_types: Vec<OverviewSymbol>,
+    /// Public functions / methods (shown only with --full).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub key_functions: Vec<OverviewSymbol>,
+    /// Most heavily connected file pairs.
+    pub most_connected: Vec<ConnectedPair>,
+    /// Top symbol names for vocabulary priming.
+    pub vocabulary: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OverviewSymbol {
+    pub name: String,
+    pub kind: String,
+    pub file: String,
+    pub line: usize,
+    pub ref_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PackageGroup {
+    pub prefix: String,
+    pub source_file_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConnectedPair {
+    pub from: String,
+    pub to: String,
+    pub edge_count: usize,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct MapReport {
     pub path: String,

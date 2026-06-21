@@ -1,108 +1,136 @@
 # Agentgrep: Generic Agent Instructions
 
-Agentgrep is a local, evidence-first CLI for codebase navigation.
-It ranks files by relevance, provides symbol and graph context, and estimates change impact.
-It has no LLM, daemon, database, or semantic search. Evidence is deterministic and local.
+Agentgrep is a local, evidence-first CLI for codebase navigation. It ranks files by relevance,
+provides symbol and call-graph context, and estimates change impact. No LLM, daemon, database,
+or semantic search. Evidence is deterministic and local. All commands accept `--json`.
 
 ## When to use `rg` vs `agentgrep`
 
 Use `rg` when:
 - you know the exact string and want raw match lines;
-- you are piping output to another tool;
-- you need pure grep speed with no ranking.
+- you are piping output to another tool (awk, sed, jq);
+- you need regex power with no ranking overhead.
 
 Use `agentgrep find` when:
-- you want ranked file candidates, not raw lines;
-- you want structured JSON for downstream use (`--json`);
+- you want ranked file candidates for an open-ended query;
+- you want structured JSON for downstream parsing;
 - you want multi-term coverage (`--match all`);
 - you want file-role filtering (`--role source`);
 - you want `next_actions` to guide follow-up.
 
-For config files, docs, or simple string searches, `rg` is usually sufficient.
-Use `agentgrep` when file ranking or structural context matters.
+Rule of thumb: `rg` for exact string recall. `agentgrep` for file ranking, structural context, and agent-shaped output.
 
-## No-index mode vs indexed mode
+## Session start — orient before searching
 
-### No-index mode
+Run once at the start of any session on an unfamiliar codebase:
 
-`agentgrep find` works with `rg` only — no index required.
+```bash
+agentgrep overview --json
+```
 
-Limitations without an index:
-- `map`, `symbol`, `related`, `blast` have limited or no graph context;
-- `find` ranking uses only lexical signals.
+Returns: entry points, package/crate structure, public types ranked by usage, vocabulary line.
+Use vocabulary to anchor your first `find` query with codebase-native identifiers.
 
-Suitable for: first contact with a repo, quick single-term lookup, error message search.
+Lighter variants:
+```bash
+agentgrep overview --only vocab --json              # vocabulary only (~50 bytes)
+agentgrep overview --only packages,entries --json   # structure only, no symbols
+agentgrep overview --min-refs 3 --json              # filter low-signal types
+agentgrep overview --full --min-refs 2 --json       # all symbols with at least 2 refs
+```
 
-### Indexed mode
+## No-index vs indexed mode
 
-Run `agentgrep index` once to unlock structural context.
+Without an index (`find` only):
+- Works with `rg`-backed ranking only.
+- `map`, `symbol`, `related`, `blast`, `trace`, `peek`, `files`, `overview` require the index.
+- Suitable for: first contact with a repo, quick single-term lookup.
 
-With the index:
-- `find` gains symbol-name boosts and graph context;
-- `map` shows incoming/outgoing edges;
-- `symbol` reports definitions and references;
-- `related` uses import/reference edges;
-- `blast` gives a more precise impact estimate.
+With index (`agentgrep index` once per session):
+- `find` gains symbol-name boosts and graph context.
+- `trace` shows call graphs and dep resolution.
+- `map` shows incoming/outgoing edges.
+- `related` uses import/reference edges.
+- `blast` gives precise impact estimates.
 
-Check freshness before using structural commands:
-
+Check freshness before structural commands:
 ```bash
 agentgrep index --status
 ```
 
-Rebuild if stale or missing.
-
 ## Command chains
 
-### Unknown feature: localize from scratch
+### Cold start on unknown codebase
 
 ```bash
-agentgrep find "feature term"
-agentgrep map <top-result-file>
-agentgrep related <top-result-file>
+agentgrep overview --json                           # orient: vocab, packages, types
+agentgrep find "<vocab-term from overview>" --brief --json  # locate files
+agentgrep trace <SymbolName> --json                 # call graph for key symbol
+agentgrep peek <SymbolName> --file <path> --json    # read implementation
 ```
 
-Use `find` to narrow candidates, `map` to inspect the likely file, `related` to see its neighborhood.
+### Feature localization
+
+```bash
+agentgrep find "feature name or concept" --brief --json
+agentgrep map <top-result-file> --json
+agentgrep related <top-result-file> --json
+```
 
 ### Symbol tracing
 
 ```bash
-agentgrep index
-agentgrep symbol <SymbolName>
-agentgrep map <definition-file>
+agentgrep trace <SymbolName> --json
+# index_status "found"    → peek the body
+# index_status "external" → dep_package names the library; callers show usage
+# index_status "not_found" → run next_actions[0] (rg fallback)
+agentgrep peek <SymbolName> --file <path> --json
 ```
-
-Use `index` first, then `symbol` to locate definitions and usages, then `map` for full context.
 
 ### Impact check before editing
 
 ```bash
-agentgrep blast <file-or-symbol>
-agentgrep related <file-or-symbol>
-agentgrep map <impacted-file>
+agentgrep blast <file-or-symbol> --json
+agentgrep related <file-or-symbol> --json
 ```
 
-Use `blast` to estimate conservative likely impact, `related` to see connected files, `map` to inspect specifics before editing.
-
-### Config or docs search
+### Confirm a file path
 
 ```bash
-rg "option-name" docs/ config/
-agentgrep find "option-name" --role config
+agentgrep files "partial-name-or-glob" --json
 ```
 
-Prefer `rg` for raw config/doc search. Use `agentgrep find --role config` when file ranking across many config files helps.
+## `trace` status — action triggers
+
+| `index_status` | Meaning | Next step |
+|---|---|---|
+| `"found"` | Defined in this repo | Read `defined_in[]`, then `peek` the body |
+| `"external"` | From a dependency | `dep_package` names the library; read `callers[]` for usage |
+| `"not_found"` | Not in repo or any dep | Run `next_actions[0]` — rg fallback command |
+
+**Empty `callers[]` does not mean unused.** Only indexed references are captured.
 
 ## Evidence and citation rules
 
 - Always cite specific file paths and line numbers from Agentgrep output when referencing code.
-- Use `Why` evidence and `next_actions` fields to explain ranking decisions.
-- Do not claim a file is relevant without citing at least one ranked result or evidence signal.
-- Do not claim a file is safe to change based solely on blast output — blast is a conservative estimate, not a guarantee.
-- Confidence values (`low | medium | high`) indicate inspection priority, not correctness.
+- Do not claim a file is relevant without citing a ranked result or evidence signal.
+- Do not claim a file is safe to change based solely on blast output — blast is a conservative estimate.
 - Scores are relative within a single response; do not compare across commands or queries.
+- Confidence values (`low | medium | high`) indicate inspection priority, not probability.
 
-## Future work
+## What not to do
 
-Evaluation of prompt strategies across real codebase tasks is planned but not yet complete.
-Claims about agent prompt effectiveness will require empirical measurement.
+- Do not open files before running `agentgrep find`.
+- Do not skip `agentgrep blast` before editing widely-connected files.
+- Do not treat blast output as exhaustive — dynamic dispatch is not captured.
+- Do not compare scores across queries.
+- Do not treat empty `callers[]` as proof a symbol is unused.
+- Do not treat `"external"` trace status as an error.
+- Do not run `find` with a generic one-word query on an unfamiliar codebase — use `overview` first.
+
+## Limitations
+
+- Does not replace reading source files, running tests, or type-checking.
+- Does not detect dynamic dispatch or runtime-constructed call paths.
+- Reference coverage is high but not exhaustive — use `rg` for guaranteed completeness.
+- Does not search outside the indexed repo or across git history.

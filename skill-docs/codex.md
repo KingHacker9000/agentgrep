@@ -4,114 +4,159 @@ Practical instructions for Codex-style terminal/code agents.
 
 ## Core rules
 
-- Prefer short, targeted commands over broad sweeps.
-- Use `agentgrep find` before opening files manually when the target is unknown.
-- Use `agentgrep blast` before editing any file with non-trivial connections.
-- Redirect long outputs to `manual-test/` rather than printing them inline.
+- Run `agentgrep overview` at session start on any unfamiliar repo before searching.
+- Run `agentgrep find` before opening files when the target is unknown.
+- Run `agentgrep blast` before editing any file with non-trivial connections.
+- Use `--json` for all automated output — text format is for human display only.
 - Do not run full-repo sweeps unless no narrower search is possible.
-- Do not assume semantic search is available — it is not.
 
-## When to reach for Agentgrep
+## When to use `agentgrep` vs `rg`
 
-Use Agentgrep (not raw `rg`) when:
-- you need ranked file candidates for an open-ended query;
-- you need structural context (symbols, edges, impact) before editing;
+Use `agentgrep` when:
+- the target is open-ended and you need ranked candidates;
+- you need structural context (symbols, call graph, impact) before editing;
 - you want `--json` for stable programmatic output.
 
-Use `rg` directly when:
+Use `rg` when:
 - you know the exact string;
 - you are piping to `awk`, `sed`, or another tool;
 - you need raw lines with no ranking overhead.
 
 ## Preferred command patterns
 
+### Orient at session start
+
+```bash
+agentgrep overview --json
+# Use vocabulary[] to anchor follow-up find queries.
+# On large repos: agentgrep overview --min-refs 3 --json
+# Types + functions: agentgrep overview --full --json
+# Vocab only: agentgrep overview --only vocab --json
+```
+
 ### Localize before opening
 
 ```bash
-agentgrep find "query term" --json
+agentgrep find "<query using vocab terms>" --brief --json
+# Read candidates[]. Open only top-ranked files.
+# If score < 0.30 with Low-confidence note: requery using vocab line terms.
 ```
 
-Read the top `candidates` in the JSON. Open only the top-ranked files.
-
-### Build index when needed
+### Check index freshness
 
 ```bash
 agentgrep index --status
-agentgrep index
+agentgrep index               # rebuild if stale or missing
 ```
 
-Run once per session when structural commands are needed. Skip if already fresh.
+### Trace a symbol's call graph
+
+```bash
+agentgrep trace <SymbolName> --json
+# index_status "found"    → peek the body with: agentgrep peek <sym> --file <path> --json
+# index_status "external" → dep_package names the library; callers[] show usage context
+# index_status "not_found" → run next_actions[0] (rg fallback)
+```
+
+### Read a symbol body
+
+```bash
+agentgrep peek <SymbolName> --file <path> --json
+agentgrep peek <SymbolName> --context 5 --json     # with 5 lines of surrounding context
+```
+
+### Confirm a file path
+
+```bash
+agentgrep files "partial-name" --json              # substring/glob against indexed paths
+```
 
 ### Inspect a candidate file
 
 ```bash
 agentgrep map src/target.rs --json
+# Use symbols[] to pick entry points; incoming_edges for callers; outgoing_edges for deps.
 ```
 
-Use `symbols` and `edges` from the output to decide what to read. Do not read the whole file first.
-
-### Trace a symbol
-
-```bash
-agentgrep symbol SymbolName --json
-```
-
-Check `definitions` and `used_by`. Treat test-only references as lower priority.
-
-### Check neighbors
+### Check neighbors before editing
 
 ```bash
 agentgrep related src/target.rs --json
+# Prefer high-confidence results (explicit imports/references over same_area proximity).
 ```
 
-Review high-confidence related files before editing.
-
-### Estimate impact
+### Estimate impact before editing
 
 ```bash
 agentgrep blast src/target.rs --json
+# Check risk_level and suggested_inspection_order. Do not edit without reviewing medium/high results.
+# Not exhaustive — dynamic dispatch paths are not captured.
 ```
-
-Inspect `risk_level` and `suggested_inspection_order`. Do not edit without reviewing medium/high-risk results.
 
 ## Output handling
 
 If any command produces output too long to process inline:
 
 ```bash
-agentgrep find "wide query" > manual-test/find-output.txt
-agentgrep blast src/large.rs --json > manual-test/blast-output.json
+agentgrep find "wide query" --json > /tmp/find-output.json
+agentgrep blast src/large.rs --json > /tmp/blast-output.json
 ```
 
 Reference the saved file instead of re-running.
 
 ## What not to do
 
-- Do not run `agentgrep find` with a very broad single-word query and read all results.
-- Do not assume blast output is exhaustive — files not listed may still be affected.
+- Do not open files before `agentgrep find`.
 - Do not skip `agentgrep blast` before editing widely-imported files.
-- Do not compare scores across different queries or commands.
-- Do not treat confidence values as probabilities.
+- Do not compare scores across different queries.
+- Do not treat empty `callers[]` as proof a symbol is unused.
+- Do not treat `"external"` trace status as an error — it means "from a dep".
+- Do not treat blast output as exhaustive.
 
 ## System prompt snippet
 
-Add this to your Codex system prompt to register Agentgrep as a tool:
+Add this to your Codex system prompt to register Agentgrep:
 
 ```
-Available local tools:
-- agentgrep find "<query>" [--json]  ranked file search over the codebase
-- agentgrep index [--status]         build or check the local code index
-- agentgrep map <file> [--json]      file-level symbol and edge context
-- agentgrep symbol <name> [--json]   definitions and references for a name
-- agentgrep related <file> [--json]  connected files by edges
-- agentgrep blast <file> [--json]    conservative change impact estimate
+Available local tools (run before opening files or making edits):
 
-Use agentgrep find before opening files.
-Use agentgrep blast before editing files with broad connections.
-Always use --json when parsing output programmatically.
-Do not assume semantic search is available.
+agentgrep overview [--full] [--min-refs N] [--only SECTIONS] [--json]
+  Cold-start orientation. Run once per session. Returns entry points, packages, key types,
+  vocabulary. Use vocabulary to anchor find queries. Sections: types,functions,packages,entries,connected,vocab.
+
+agentgrep find "<query>" [--brief] [--role source|doc|config|test] [--json]
+  Ranked file search. Use vocabulary from overview for best results. --brief gives compact
+  output with a vocab: line for follow-up query anchoring.
+
+agentgrep index [--status]
+  Build or check the local code index. Required before trace, peek, files, map (full context).
+  Run once per session; --status checks freshness.
+
+agentgrep trace <symbol> [--json]
+  Call graph: who calls it, where defined, what it calls.
+  index_status: "found" (local) | "external" (dep; dep_package names it) | "not_found" (use rg)
+
+agentgrep peek <symbol> [--file <path>] [--context N] [--json]
+  Read a symbol's implementation body. Use after trace to read the code.
+
+agentgrep files "<pattern>" [--json]
+  List indexed files matching a substring or glob. Use to confirm exact paths.
+
+agentgrep map <file> [--json]
+  File inspection: defined symbols, incoming callers, outgoing deps.
+
+agentgrep related <file-or-symbol> [--json]
+  Connected files by imports and references. Use before editing.
+
+agentgrep blast <file-or-symbol> [--json]
+  Conservative impact estimate. risk_level: low | medium | high.
+  Use before editing. Not exhaustive.
+
+Rules:
+- Run overview once at session start on unknown codebases.
+- Run find before opening any file.
+- Run blast before editing widely-connected files.
+- Always use --json when parsing output.
+- index_status "external" means "in a dependency" — not an error.
+- Empty callers[] does not mean unused.
 ```
-
-## Future work
-
-Evaluation of prompt strategies across real codebase tasks is planned but not yet complete.

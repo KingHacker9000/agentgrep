@@ -1,139 +1,123 @@
 # Agentgrep: Claude Code Agent Instructions
 
-Practical instructions for Claude Code-style agents using Agentgrep as a codebase radar.
-
 ## Core principle
 
-Use Agentgrep to localize before you read, and to estimate impact before you edit.
-Agentgrep is a radar — it narrows the search space. You still read source and run tests to confirm.
+**Localize before you read. Estimate impact before you edit.**
 
-## When to reach for Agentgrep
+Agentgrep is a radar — narrow the search space first, then read source and run tests to confirm.
+All commands accept `--json` for stable, parseable output. Always use `--json` in tool-call contexts.
 
-Before any file read for an unfamiliar target:
+## Session start: orient before searching
 
-```bash
-agentgrep find "query" --json
-```
-
-Before any edit to a non-trivial file:
+Run once at the start of any session on an unfamiliar codebase:
 
 ```bash
-agentgrep blast src/target.rs --json
+agentgrep overview --json
 ```
 
-Before any refactor touching a symbol:
+Returns entry points, package/crate structure, public types ranked by reference count, and a
+vocabulary line. **Use vocabulary terms to anchor your first `find` query** — codebase-native
+identifiers outperform generic terms.
+
+Lighter variants:
+```bash
+agentgrep overview --only vocab --json              # vocabulary line only (~50 bytes)
+agentgrep overview --only packages,entries --json   # structure only, no symbols
+agentgrep overview --min-refs 3 --json              # filter low-signal types
+agentgrep overview --full --min-refs 2 --json       # all types + functions with signal
+```
+
+Do not skip `overview` on an unfamiliar repo — generic queries waste 3-5 calls finding
+vocabulary that `overview` gives in one.
+
+## Task workflows
+
+### Feature localization
 
 ```bash
-agentgrep symbol SymbolName --json
-agentgrep related src/target.rs --json
+agentgrep overview --only vocab --json              # 1. get vocabulary
+agentgrep find "<vocab-informed query>" --brief --json  # 2. locate files
+agentgrep trace <SymbolName> --json                 # 3. call graph for key symbol
+agentgrep peek <SymbolName> --file <path> --json    # 4. read implementation
 ```
 
-## Bug fix loop
+### Bug fix
 
 ```bash
-# 1. Localize the error
-agentgrep find "exact error message or key term"
-
-# 2. Inspect the top result
-agentgrep map src/likely-file.rs
-
-# 3. Check impact before editing
-agentgrep blast src/likely-file.rs
-
-# 4. Read the relevant section of the file, edit, run tests
+agentgrep find "exact error text or key term" --brief --json
+agentgrep trace <symbol-near-error> --json
+agentgrep peek <symbol> --file <file> --context 5 --json
+agentgrep blast <file> --json                       # check impact before editing
 ```
 
-## Refactor loop
+### Refactor
 
 ```bash
-# 1. Find definition and all usages
-agentgrep index
-agentgrep symbol SymbolName --json
-
-# 2. Inspect connected files
-agentgrep related src/target.rs --json
-
-# 3. Estimate blast radius
-agentgrep blast src/target.rs --json
-
-# 4. Inspect suggested files in order, edit carefully, run wider tests
+agentgrep trace <SymbolName> --json                 # all callers and callees
+agentgrep related <file> --json                     # connected neighbors
+agentgrep blast <symbol> --json                     # conservative impact radius
 ```
 
-## Feature localization loop
+### Confirm a file path
 
 ```bash
-# 1. Search for the feature
-agentgrep find "feature name or key concept"
-
-# 2. Map the top candidate
-agentgrep map src/candidate.rs
-
-# 3. Find related files
-agentgrep related src/candidate.rs
-
-# 4. Open and read the specific files — do not open the whole repo
+agentgrep files "partial-name-or-glob" --json       # substring / glob against indexed paths
 ```
 
-## Example: tracing AuthState
+## `trace` status — action triggers
 
-```bash
-agentgrep index --status
-agentgrep index
+`index_status` tells you exactly what to do next:
 
-agentgrep symbol AuthState --json
-# read: definitions, used_by, production vs test breakdown
+| `index_status` | Meaning | Next step |
+|---|---|---|
+| `"found"` | Defined in this repo | Check `defined_in[]`, then `agentgrep peek <sym> --file <path>` |
+| `"external"` | From a dependency | `dep_package` names the library if resolved; read `callers[]` for usage context |
+| `"not_found"` | Not in repo or any dep record | Run `next_actions[0]` — always an `rg` fallback command |
 
-agentgrep map src/auth.rs --json
-# read: symbols, incoming edges (callers), outgoing edges (deps)
+**Empty `callers[]` does not mean unused** — only indexed references are captured.
+**`"external"` is not an error** — it means the symbol is in a library, not this repo.
 
-agentgrep related src/auth.rs --json
-# read: high-confidence connected files
+## `find --brief` output
 
-agentgrep blast src/auth.rs --json
-# read: risk_level, suggested_inspection_order
-# inspect medium/high risk files before editing
+```
+src/path/file.rs:42:SymbolName  [score:0.82 conf:high role:source]
+vocab: SymA, SymB, SymC, ...
 ```
 
-## Output interpretation
+If the top score is below 0.30 and a "Low-confidence" note appears, the query terms don't match
+codebase vocabulary. Use the `vocab:` line terms to requery — they come from actual symbol names
+in the top candidates.
 
-| Field | Meaning |
-|---|---|
-| `candidates[].score` | Relative ranking within this response only |
-| `candidates[].why` | Evidence signals used for ranking |
-| `next_actions` | Suggested follow-up commands |
-| `confidence` | Inspection priority: `low / medium / high` |
-| `risk_level` | Conservative blast estimate: `low / medium / high` |
+## Output fields — stable vs best-effort
 
-Do not compare scores across queries. Do not treat confidence as a probability.
+| Field | Parse? | Meaning |
+|---|---|---|
+| `candidates[].file_path` | ✓ stable | Use this path |
+| `candidates[].score` | ✗ | Relative within one response only; do not compare across queries |
+| `trace.index_status` | ✓ stable | `"found"` / `"external"` / `"not_found"` |
+| `trace.dep_package` | ✓ stable | Library name when status is `"external"` |
+| `trace.callers[]` | ✓ stable | Files that call this symbol |
+| `trace.defined_in[]` | ✓ stable | Definition locations |
+| `overview.vocabulary[]` | ✓ stable | Key symbol names for query anchoring |
+| `next_actions[]` | ✓ stable | Follow these |
+| `confidence` | ✗ | Inspection priority, not probability |
+| `risk_level` | ✗ | Conservative estimate, not proof |
 
 ## What not to do
 
-- Do not open large portions of the repo before running `agentgrep find`.
-- Do not skip `agentgrep blast` before editing widely-connected files.
-- Do not treat blast output as exhaustive — it is a conservative estimate.
-- Do not assume semantic search is available — it is not.
-- Do not cite evidence without a file path from Agentgrep output.
+- **Do not read files before `agentgrep find`.** One `find --brief` call costs ~100 bytes; opening a wrong file costs thousands.
+- **Do not skip `agentgrep blast`** before editing a file that map or related shows as widely connected.
+- **Do not compare scores across queries.** Scores are relative within one response only.
+- **Do not treat empty `callers[]` as proof a symbol is unused.** The index captures most but not all references.
+- **Do not treat `"external"` status as an error.** It means the symbol is in a dependency.
+- **Do not run `find` with a generic one-word query** without first getting vocabulary from `overview`.
+- **Do not assume blast is exhaustive.** Dynamic dispatch and runtime paths are not captured.
 
-## JSON for tool use
+## Limitations
 
-When using Agentgrep as a tool call with structured output:
-
-```bash
-agentgrep find "auth redirect" --json
-agentgrep map src/auth.rs --json
-agentgrep symbol AuthState --json
-agentgrep related src/auth.rs --json
-agentgrep blast src/auth.rs --json
-```
-
-Stable fields (safe to parse): `query`, `path`, `candidates`, `matches`, `related_files`,
-`impacted_files`, `next_actions`, `index_status`.
-
-Best-effort fields (do not hardcode): exact scores, exact reason strings, exact evidence ordering.
-
-See [docs/JSON_CONTRACT.md](../docs/JSON_CONTRACT.md) for the full contract.
-
-## Future work
-
-Evaluation of Claude Code prompt strategies across real codebase tasks is planned but not yet complete.
-Claims about agent prompt effectiveness will require empirical measurement.
+Agentgrep is a radar, not a proof system. It does not:
+- replace reading the final source file before editing;
+- run tests or type-check;
+- guarantee complete reference coverage (use `rg` for that);
+- detect dynamic dispatch or runtime-constructed call paths;
+- search outside the indexed repo.
