@@ -165,6 +165,15 @@ pub enum Commands {
     Trace {
         /// Symbol name to trace (exact or case-insensitive match).
         symbol: String,
+        /// For each caller, include the AST-extracted containing function body.
+        /// Returns the full function enclosing the call site (capped at 60 lines with
+        /// smart truncation keeping the call site always visible). Capped at 10 callers.
+        #[arg(long)]
+        callers_body: bool,
+        /// Separate test-file callers into test_callers[] instead of mixing with production
+        /// callers. With --callers-body, test caller bodies are also included (max 5).
+        #[arg(long)]
+        include_tests: bool,
         /// Write stable JSON instead of text.
         #[arg(long, help = "Write stable JSON instead of text.")]
         json: bool,

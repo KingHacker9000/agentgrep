@@ -15,5 +15,6 @@ Desktop.ini
 *~
 .idea/
 .vscode/
+.claude/
 
 # Keep the lockfile for this binary CLI checked in.

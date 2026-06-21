@@ -1,4 +1,5 @@
 mod blast;
+mod caller_body;
 mod cli;
 mod dep_resolve;
 mod overview;
@@ -25,6 +26,78 @@ fn main() {
     if let Err(err) = run() {
         eprintln!("Error: {err}");
         std::process::exit(1);
+    }
+}
+
+/// Split a camelCase or snake_case identifier into lowercase words.
+fn split_identifier(s: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    for c in s.chars() {
+        if c == '_' || c == '-' {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+        } else if c.is_uppercase() && !current.is_empty() {
+            words.push(std::mem::take(&mut current));
+            current.push(c.to_ascii_lowercase());
+        } else {
+            current.push(c.to_ascii_lowercase());
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+/// Score a vocabulary term against a query by word-level overlap.
+/// Returns a value in [0, 1]: fraction of query words that prefix-match any term word.
+fn vocab_overlap(query: &str, term: &str) -> f64 {
+    let query_words: Vec<String> = query
+        .split_whitespace()
+        .map(|w| w.to_ascii_lowercase())
+        .collect();
+    let term_words = split_identifier(term);
+    if query_words.is_empty() {
+        return 0.0;
+    }
+    let matched = query_words.iter().filter(|qw| {
+        term_words
+            .iter()
+            .any(|tw| tw.starts_with(qw.as_str()) || qw.starts_with(tw.as_str()))
+    });
+    matched.count() as f64 / query_words.len() as f64
+}
+
+/// Given the original query and a vocabulary list, return the best matching term
+/// (if any word overlaps). Short or generic terms are filtered out.
+fn best_vocab_term(query: &str, vocab: &[String]) -> Option<String> {
+    const GENERIC: &[&str] = &[
+        "main", "new", "init", "error", "result", "ok", "err", "none", "some", "config",
+        "get", "set", "run", "build", "update", "add", "delete", "create", "from", "into",
+        "default", "debug", "clone", "drop", "send", "sync",
+    ];
+    let mut best_score = 0.0_f64;
+    let mut best_term: Option<&str> = None;
+    for term in vocab {
+        if term.len() < 4 {
+            continue;
+        }
+        if GENERIC.contains(&term.to_ascii_lowercase().as_str()) {
+            continue;
+        }
+        let score = vocab_overlap(query, term);
+        if score > best_score {
+            best_score = score;
+            best_term = Some(term.as_str());
+        }
+    }
+    // Require at least one word to match.
+    if best_score > 0.0 {
+        best_term.map(|s| s.to_string())
+    } else {
+        None
     }
 }
 
@@ -99,29 +172,75 @@ fn run() -> Result<()> {
             coverage.semantic_status = semantic_status;
 
             // Vocabulary mismatch: top score below 0.30 and no strong evidence found.
-            let mismatch_note = {
-                let top_score = candidates.first().map(|c| c.score).unwrap_or(0.0);
-                let has_strong_signal = candidates.iter().any(|c| {
-                    c.evidence.iter().any(|e| {
-                        matches!(
-                            e.evidence_type.as_str(),
-                            "exact_phrase_match"
-                                | "near_phrase_match"
-                                | "indexed_symbol_definition"
-                                | "indexed_symbol_reference"
-                        )
+            let top_score = candidates.first().map(|c| c.score).unwrap_or(0.0);
+            let has_strong_signal = candidates.iter().any(|c| {
+                c.evidence.iter().any(|e| {
+                    matches!(
+                        e.evidence_type.as_str(),
+                        "exact_phrase_match"
+                            | "near_phrase_match"
+                            | "indexed_symbol_definition"
+                            | "indexed_symbol_reference"
+                    )
+                })
+            });
+            // Mismatch: no strong signal AND the best result is still low-confidence.
+            // Graph-edge boosts can inflate scores to ~0.37 even when no query terms exist in
+            // the codebase, so we check the top candidate's Confidence in addition to the score.
+            let top_conf_low = candidates
+                .first()
+                .map(|c| c.confidence == types::Confidence::Low)
+                .unwrap_or(false);
+            let is_mismatch = !has_strong_signal
+                && !candidates.is_empty()
+                && (top_score < 0.30 || (top_conf_low && top_score < 0.40));
+
+            let (mismatch_note, auto_expansion) = if is_mismatch {
+                // Build a wider vocab and try to find the best matching term.
+                let wide_vocab = rank::build_vocabulary(&candidates, 20);
+                let best_term = best_vocab_term(&query, &wide_vocab);
+
+                let expansion = best_term.and_then(|requery| {
+                    let rs = search::run_with_index(
+                        &repo.root,
+                        &requery,
+                        index_used,
+                        &index_status,
+                    )
+                    .ok()?;
+                    let mut rc = rank::rank_with_index(
+                        &requery,
+                        rs.matches,
+                        loaded.index.as_ref(),
+                        &index_status,
+                        &filters,
+                    );
+                    rank::apply_tiered_density(&mut rc);
+                    rc.truncate(5);
+                    if rc.is_empty() {
+                        return None;
+                    }
+                    Some(types::AutoExpansion {
+                        original_query: query.clone(),
+                        requery,
+                        candidates: rc,
                     })
                 });
-                if top_score < 0.30 && !has_strong_signal && !candidates.is_empty() {
-                    candidates.truncate(5);
-                    Some(
-                        "Low-confidence results: query terms may not match codebase vocabulary. \
-                         Try rephrasing with identifiers from the codebase, or use `rg` for raw search."
-                            .to_string(),
-                    )
-                } else {
-                    None
-                }
+
+                let note = match &expansion {
+                    Some(exp) => format!(
+                        "Low confidence for \"{}\" — auto-expanded to \"{}\"",
+                        query, exp.requery
+                    ),
+                    None => "Low-confidence results: query terms may not match codebase \
+                             vocabulary. Try rephrasing with identifiers from the codebase, \
+                             or use `rg` for raw search."
+                        .to_string(),
+                };
+                candidates.truncate(5);
+                (Some(note), expansion)
+            } else {
+                (None, None)
             };
 
             let report = types::FindReport {
@@ -134,6 +253,7 @@ fn run() -> Result<()> {
                 next_actions,
                 note: mismatch_note,
                 vocabulary,
+                auto_expansion,
             };
             output::write_find_report(&report, json, brief)?;
         }
@@ -229,7 +349,12 @@ fn run() -> Result<()> {
             let report = files::build_report(&repo, &pattern, index)?;
             files::write_report(&report, json)?;
         }
-        cli::Commands::Trace { symbol, json } => {
+        cli::Commands::Trace {
+            symbol,
+            callers_body,
+            include_tests,
+            json,
+        } => {
             let repo = repo::discover()?;
             let loaded = index::load(&repo)?;
             let Some(index) = loaded.index.as_ref() else {
@@ -237,7 +362,8 @@ fn run() -> Result<()> {
                     "no index found — run `agentgrep index` first to enable trace"
                 );
             };
-            let report = trace::build_report(&symbol, index, &repo.root)?;
+            let report =
+                trace::build_report(&symbol, index, &repo.root, callers_body, include_tests)?;
             trace::write_report(&report, json)?;
         }
         cli::Commands::Overview { full, min_refs, only, json } => {

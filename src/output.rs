@@ -67,6 +67,22 @@ pub fn write_find_report(report: &FindReport, json: bool, brief: bool) -> Result
         println!();
     }
 
+    if let Some(exp) = &report.auto_expansion {
+        println!("Auto-expansion: \"{}\" → \"{}\"", exp.original_query, exp.requery);
+        println!();
+        for (i, c) in exp.candidates.iter().enumerate() {
+            println!(
+                "  {}. {}    role {}    score {:.2}    confidence {}",
+                i + 1,
+                c.path,
+                c.role,
+                c.score,
+                c.confidence
+            );
+        }
+        println!();
+    }
+
     println!("Search coverage:");
     println!("- raw rg matches: {}", report.coverage.raw_rg_match_count);
     println!(
@@ -118,6 +134,25 @@ fn write_find_brief(report: &FindReport) -> Result<()> {
     }
     if !report.vocabulary.is_empty() {
         println!("vocab: {}", report.vocabulary.join(", "));
+    }
+    if let Some(exp) = &report.auto_expansion {
+        println!(
+            "auto-expansion: \"{}\" → \"{}\"",
+            exp.original_query, exp.requery
+        );
+        for c in &exp.candidates {
+            let loc = if let Some(sym) = c.symbols.first() {
+                format!("{}:{}:{}", c.path, sym.line, sym.name)
+            } else if let Some(lr) = c.line_ranges.first() {
+                format!("{}:{}", c.path, lr.start)
+            } else {
+                c.path.clone()
+            };
+            println!("  {loc}  [{:.2} {} {}]", c.score, c.confidence, c.role);
+        }
+    }
+    if let Some(note) = &report.note {
+        println!("note: {note}");
     }
     Ok(())
 }

@@ -1,14 +1,17 @@
 use anyhow::Result;
 use std::path::Path;
 
+use crate::caller_body;
 use crate::dep_resolve::resolve_dep_for_symbol;
-use crate::index::{EdgeConfidence, RepoIndex};
+use crate::index::{EdgeConfidence, ReferenceContext, RepoIndex};
 use crate::types::{TraceCallSite, TraceDefinition, TraceReport};
 
 pub fn build_report(
     symbol_name: &str,
     index: &RepoIndex,
     repo_root: &Path,
+    callers_body: bool,
+    include_tests: bool,
 ) -> Result<TraceReport> {
     // 1. Definitions: symbols whose name matches (case-insensitive).
     let defined_in: Vec<TraceDefinition> = index
@@ -23,13 +26,12 @@ pub fn build_report(
         })
         .collect();
 
-    // Symbol not found locally — run dep detection path.
     if defined_in.is_empty() {
-        return build_external_report(symbol_name, index, repo_root);
+        return build_external_report(symbol_name, index, repo_root, callers_body, include_tests);
     }
 
-    // 2. Callers: symbol_references where symbol_name matches and target_file is known.
-    let mut callers: Vec<TraceCallSite> = index
+    // 2. Collect all callers (resolved + inferred).
+    let mut all_callers: Vec<TraceCallSite> = index
         .symbol_references
         .iter()
         .filter(|r| {
@@ -42,11 +44,11 @@ pub fn build_report(
             line: r.line_number,
             context: r.context.to_string(),
             confidence: r.confidence.to_string(),
+            containing_function: None,
         })
         .collect();
 
-    // Also include inferred call-site refs (target_file=None).
-    let mut call_sites: Vec<TraceCallSite> = index
+    let inferred: Vec<TraceCallSite> = index
         .symbol_references
         .iter()
         .filter(|r| {
@@ -59,26 +61,46 @@ pub fn build_report(
             line: r.line_number,
             context: r.context.to_string(),
             confidence: r.confidence.to_string(),
+            containing_function: None,
         })
         .collect();
 
-    callers.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
-    callers.dedup_by(|a, b| a.file == b.file && a.line == b.line);
-    call_sites.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
-    call_sites.dedup_by(|a, b| a.file == b.file && a.line == b.line);
-
-    for cs in call_sites {
-        if !callers.iter().any(|c| c.file == cs.file && c.line == cs.line) {
-            callers.push(cs);
+    // Merge and dedup.
+    for cs in inferred {
+        if !all_callers
+            .iter()
+            .any(|c| c.file == cs.file && c.line == cs.line)
+        {
+            all_callers.push(cs);
         }
     }
-    callers.sort_by(|a, b| {
-        let a_prod = (a.context != "production") as u8;
-        let b_prod = (b.context != "production") as u8;
-        a_prod.cmp(&b_prod).then(a.file.cmp(&b.file))
-    });
+    all_callers.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
+    all_callers.dedup_by(|a, b| a.file == b.file && a.line == b.line);
 
-    // 3. Callees: symbols referenced from the definition files, pointing elsewhere.
+    // Split production vs test callers.
+    let (mut callers, mut test_callers) = if include_tests {
+        let prod: Vec<_> = all_callers
+            .iter()
+            .filter(|c| c.context == "production")
+            .cloned()
+            .collect();
+        let test: Vec<_> = all_callers
+            .iter()
+            .filter(|c| c.context != "production")
+            .cloned()
+            .collect();
+        (prod, test)
+    } else {
+        // Keep existing behaviour: all callers together, production first.
+        all_callers.sort_by(|a, b| {
+            let a_prod = (a.context != "production") as u8;
+            let b_prod = (b.context != "production") as u8;
+            a_prod.cmp(&b_prod).then(a.file.cmp(&b.file))
+        });
+        (all_callers, vec![])
+    };
+
+    // 3. Callees from definition files.
     let def_files: Vec<&str> = defined_in.iter().map(|d| d.file.as_str()).collect();
     let mut callees: Vec<TraceCallSite> = index
         .symbol_references
@@ -99,11 +121,28 @@ pub fn build_report(
             line: r.target_line.unwrap_or(r.line_number),
             context: format!("via {}", r.symbol_name),
             confidence: r.confidence.to_string(),
+            containing_function: None,
         })
         .collect();
     callees.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
     callees.dedup_by(|a, b| a.file == b.file && a.context == b.context);
     callees.truncate(20);
+
+    // 4. Optionally enrich callers with AST-extracted containing function bodies.
+    if callers_body {
+        enrich_with_bodies(
+            &mut callers,
+            caller_body::MAX_CALLERS_WITH_BODY,
+            repo_root,
+        );
+        if include_tests {
+            enrich_with_bodies(
+                &mut test_callers,
+                caller_body::MAX_TEST_CALLERS_WITH_BODY,
+                repo_root,
+            );
+        }
+    }
 
     let total = callers.len() + callees.len();
     let note = if total == 0 {
@@ -133,35 +172,38 @@ pub fn build_report(
         defined_in,
         callers,
         callees,
+        test_callers,
         next_actions,
         dep_package: None,
         note,
     })
 }
 
-/// Build a TraceReport for a symbol not found in the local index.
-/// Tries to identify which external dep provides it via:
-/// 1. Direct dep_imports table lookup (index-time explicit import records)
-/// 2. query-time AST scan of call site files (type annotations on receivers)
+fn enrich_with_bodies(callers: &mut Vec<TraceCallSite>, cap: usize, repo_root: &Path) {
+    for caller in callers.iter_mut().take(cap) {
+        caller.containing_function =
+            caller_body::from_file(&caller.file, caller.line, repo_root);
+    }
+}
+
 fn build_external_report(
     symbol_name: &str,
     index: &RepoIndex,
     repo_root: &Path,
+    callers_body: bool,
+    _include_tests: bool,
 ) -> Result<TraceReport> {
-    // Gather every reference to this symbol from the index.
     let references: Vec<&crate::index::IndexedSymbolReference> = index
         .symbol_references
         .iter()
         .filter(|r| r.symbol_name.eq_ignore_ascii_case(symbol_name))
         .collect();
 
-    // Layer 1: exact name match in dep_imports (explicit import statement).
     let dep_package = index
         .dep_imports
         .iter()
         .find(|d| d.symbol_or_module.eq_ignore_ascii_case(symbol_name))
         .map(|d| d.dep_package.clone())
-        // Layer 2: AST scan of call site files for type annotations.
         .or_else(|| {
             if !references.is_empty() {
                 resolve_dep_for_symbol(symbol_name, index, repo_root)
@@ -189,42 +231,47 @@ fn build_external_report(
             "external".to_string(),
             Some(format!(
                 "'{symbol_name}' is not defined in this repo ({} reference(s) found). \
-                 Likely from an external dependency — check the import statements in the \
-                 files below, or run `rg '{symbol_name}'` for a raw search.",
+                 Likely from an external dependency — check import statements in the files \
+                 below, or run `rg '{symbol_name}'` for a raw search.",
                 references.len()
             )),
         ),
     };
 
-    // Build a caller list from references so the agent can see context.
     let mut callers: Vec<TraceCallSite> = references
         .iter()
+        .filter(|r| r.context == ReferenceContext::Production)
         .map(|r| TraceCallSite {
             file: r.from_file.clone(),
             line: r.line_number,
             context: r.context.to_string(),
             confidence: r.confidence.to_string(),
+            containing_function: None,
         })
         .collect();
-    callers.sort_by(|a, b| {
-        let a_prod = (a.context != "production") as u8;
-        let b_prod = (b.context != "production") as u8;
-        a_prod.cmp(&b_prod).then(a.file.cmp(&b.file))
-    });
+    callers.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
     callers.dedup_by(|a, b| a.file == b.file && a.line == b.line);
     callers.truncate(15);
 
+    if callers_body {
+        enrich_with_bodies(
+            &mut callers,
+            caller_body::MAX_CALLERS_WITH_BODY,
+            repo_root,
+        );
+    }
+
     let mut next_actions = Vec::new();
     if let Some(pkg) = &dep_package {
-        next_actions.push(format!(
-            "# Check external dep documentation for '{pkg}'"
-        ));
+        next_actions.push(format!("# Check external dep documentation for '{pkg}'"));
     }
     for caller in callers.iter().take(3) {
         next_actions.push(format!("open {}:{}", caller.file, caller.line));
     }
     if dep_package.is_none() {
-        next_actions.push(format!("rg '{symbol_name}' --type-add 'src:*.{{rs,py,ts,js}}' -t src"));
+        next_actions.push(format!(
+            "rg '{symbol_name}' --type-add 'src:*.{{rs,py,ts,js}}' -t src"
+        ));
     }
 
     Ok(TraceReport {
@@ -233,6 +280,7 @@ fn build_external_report(
         defined_in: vec![],
         callers,
         callees: vec![],
+        test_callers: vec![],
         next_actions,
         dep_package,
         note,
@@ -259,7 +307,11 @@ pub fn write_report(report: &TraceReport, json: bool) -> Result<()> {
             if !report.callers.is_empty() {
                 println!("Referenced in ({}):", report.callers.len());
                 for c in &report.callers {
-                    println!("  {}:{}  [{}, {}]", c.file, c.line, c.context, c.confidence);
+                    print!("  {}:{}  [{}, {}]", c.file, c.line, c.context, c.confidence);
+                    if let Some(f) = &c.containing_function {
+                        print!("  fn:{}", f.name);
+                    }
+                    println!();
                 }
             }
         }
@@ -284,6 +336,28 @@ pub fn write_report(report: &TraceReport, json: bool) -> Result<()> {
             }
             for c in &report.callers {
                 println!("  {}:{}  [{}, {}]", c.file, c.line, c.context, c.confidence);
+                if let Some(f) = &c.containing_function {
+                    let trunc = if f.truncated { " [truncated]" } else { "" };
+                    println!("  fn: {} (lines {}-{}){}", f.name, f.line_start, f.line_end, trunc);
+                    for line in f.body.lines().take(3) {
+                        println!("    {line}");
+                    }
+                    if f.body.lines().count() > 3 {
+                        println!("    ...");
+                    }
+                    println!();
+                }
+            }
+
+            if !report.test_callers.is_empty() {
+                println!();
+                println!("Test callers ({}):", report.test_callers.len());
+                for c in &report.test_callers {
+                    println!("  {}:{}  [{}]", c.file, c.line, c.confidence);
+                    if let Some(f) = &c.containing_function {
+                        println!("  fn: {} (lines {}-{})", f.name, f.line_start, f.line_end);
+                    }
+                }
             }
 
             println!();

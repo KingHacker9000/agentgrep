@@ -14,9 +14,11 @@ pub struct FindReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     /// Codebase vocabulary: top matching symbol names surfaced from the index.
-    /// Helps agents learn the exact identifiers used in this repo for the query concept.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vocabulary: Vec<String>,
+    /// Populated on mismatch: automatic re-query using the best vocabulary match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_expansion: Option<AutoExpansion>,
 }
 
 /// A compact symbol reference attached to a find candidate.
@@ -176,6 +178,9 @@ pub struct TraceReport {
     pub defined_in: Vec<TraceDefinition>,
     pub callers: Vec<TraceCallSite>,
     pub callees: Vec<TraceCallSite>,
+    /// Test-file callers, populated only when --include-tests is passed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub test_callers: Vec<TraceCallSite>,
     pub next_actions: Vec<String>,
     /// Set when the symbol is determined to be from an external dependency.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -199,6 +204,35 @@ pub struct TraceCallSite {
     pub line: usize,
     pub context: String,
     pub confidence: String,
+    /// Populated when --callers-body is passed: the function body enclosing this call site.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub containing_function: Option<ContainingFunction>,
+}
+
+/// The AST-extracted function/method that contains a call site.
+/// Provides the minimal semantic unit an agent needs to understand and update the call.
+#[derive(Debug, Clone, Serialize)]
+pub struct ContainingFunction {
+    pub name: String,
+    /// First line of the function (signature).
+    pub signature: String,
+    pub line_start: usize,
+    pub line_end: usize,
+    /// Full function body, or a smart-truncated version for functions > 60 lines.
+    pub body: String,
+    /// True when the body was truncated. The call site is always included in the excerpt.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+/// Populated on low-confidence find results. Holds results from an automatic
+/// re-query using the best-matching vocabulary term from the index.
+#[derive(Debug, Clone, Serialize)]
+pub struct AutoExpansion {
+    pub original_query: String,
+    pub requery: String,
+    /// Top candidates from the re-query (max 5, brief format).
+    pub candidates: Vec<FileCandidate>,
 }
 
 /// Report for `agentgrep overview` — lightweight codebase orientation.
@@ -631,6 +665,7 @@ mod tests {
             next_actions: vec!["agentgrep map src/search.rs".to_string()],
             note: None,
             vocabulary: vec![],
+            auto_expansion: None,
         };
 
         let json = serde_json::to_value(&report).unwrap();
