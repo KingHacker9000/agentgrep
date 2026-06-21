@@ -153,6 +153,7 @@ fn push_rust_symbol<F>(
     F: Fn(&str) -> Option<String>,
 {
     let line_number = node.start_position().row + 1;
+    let end_line = node.end_position().row + 1;
     let line = node
         .utf8_text(source.as_bytes())
         .ok()
@@ -163,14 +164,16 @@ fn push_rust_symbol<F>(
         return;
     };
 
-    facts.symbols.push(symbol(
+    let mut sym = symbol(
         name,
         kind,
         file_path,
         line_number,
         visibility_from_line(line),
         symbol_signature(source, line_number, 120),
-    ));
+    );
+    sym.end_line = Some(end_line);
+    facts.symbols.push(sym);
 }
 
 fn visibility_from_line(line: &str) -> Visibility {

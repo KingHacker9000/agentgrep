@@ -125,31 +125,35 @@ fn walk_ts_node(
         "function_declaration" | "generator_function_declaration" => {
             if let Some(name) = node
                 .child_by_field_name("name")
-                .and_then(|node| node.utf8_text(source.as_bytes()).ok())
+                .and_then(|n| n.utf8_text(source.as_bytes()).ok())
             {
-                facts.symbols.push(symbol(
+                let mut sym = symbol(
                     name.to_string(),
                     SymbolKind::Function,
                     file_path,
                     node.start_position().row + 1,
                     ts_visibility(name, exported),
                     symbol_signature(source, node.start_position().row + 1, 120),
-                ));
+                );
+                sym.end_line = Some(node.end_position().row + 1);
+                facts.symbols.push(sym);
             }
         }
         "class_declaration" => {
             if let Some(name) = node
                 .child_by_field_name("name")
-                .and_then(|node| node.utf8_text(source.as_bytes()).ok())
+                .and_then(|n| n.utf8_text(source.as_bytes()).ok())
             {
-                facts.symbols.push(symbol(
+                let mut sym = symbol(
                     name.to_string(),
                     SymbolKind::Struct,
                     file_path,
                     node.start_position().row + 1,
                     ts_visibility(name, exported),
                     symbol_signature(source, node.start_position().row + 1, 120),
-                ));
+                );
+                sym.end_line = Some(node.end_position().row + 1);
+                facts.symbols.push(sym);
             }
         }
         "lexical_declaration" | "variable_declaration" => {
@@ -190,14 +194,16 @@ fn extract_variable_symbol(
         _ => return,
     };
 
-    facts.symbols.push(symbol(
+    let mut sym = symbol(
         name.to_string(),
         kind,
         file_path,
         node.start_position().row + 1,
         ts_visibility(name, exported),
         symbol_signature(source, node.start_position().row + 1, 120),
-    ));
+    );
+    sym.end_line = Some(node.end_position().row + 1);
+    facts.symbols.push(sym);
 }
 
 fn resolve_ts_import(

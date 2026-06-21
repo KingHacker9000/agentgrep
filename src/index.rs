@@ -19,7 +19,7 @@ use crate::text::shorten_snippet;
 use crate::types::{IndexedSymbol, SymbolKind, Visibility};
 use serde_json::Value;
 
-pub const INDEX_SCHEMA_VERSION: u32 = 6;
+pub const INDEX_SCHEMA_VERSION: u32 = 7;
 pub const HASH_LIMIT_BYTES: u64 = 1024 * 256;
 pub const MAX_LEX_TERMS: usize = 300;
 const LEX_READ_SIZE_LIMIT: u64 = HASH_LIMIT_BYTES;
@@ -910,16 +910,18 @@ fn build_import_binding_symbol_references(
 
     let mut references = Vec::new();
     for binding in bindings {
-        let Some(target_file) = binding.target_file.as_ref() else {
-            continue;
-        };
-        let Some(target_line) = definition_lines
-            .get(&(target_file.clone(), binding.symbol_name.clone()))
-            .copied()
-        else {
-            continue;
-        };
-        references.push(binding.clone().into_reference(Some(target_line)));
+        if let Some(target_file) = binding.target_file.as_ref() {
+            let Some(target_line) = definition_lines
+                .get(&(target_file.clone(), binding.symbol_name.clone()))
+                .copied()
+            else {
+                continue;
+            };
+            references.push(binding.clone().into_reference(Some(target_line)));
+        } else if binding.confidence == EdgeConfidence::Inferred {
+            // call site — target file unknown at parse time; still emit for used_by tracking
+            references.push(binding.clone().into_reference(None));
+        }
     }
 
     references.sort_by(|left, right| {
@@ -1483,6 +1485,7 @@ fn symbol_record(
         line_number,
         visibility,
         signature,
+        end_line: None,
     }
 }
 
@@ -2867,6 +2870,7 @@ mod tests {
                 line_number: 1,
                 visibility: Visibility::Public,
                 signature: Some("pub struct SearchMatch {}".to_string()),
+                end_line: None,
             },
             IndexedSymbol {
                 name: "run".to_string(),
@@ -2875,6 +2879,7 @@ mod tests {
                 line_number: 2,
                 visibility: Visibility::Private,
                 signature: Some("fn run() {".to_string()),
+                end_line: None,
             },
         ];
 
@@ -2917,6 +2922,7 @@ mod tests {
                 line_number: 1,
                 visibility: Visibility::Public,
                 signature: Some("pub struct Helper {}".to_string()),
+                end_line: None,
             },
             IndexedSymbol {
                 name: "Helper".to_string(),
@@ -2925,6 +2931,7 @@ mod tests {
                 line_number: 1,
                 visibility: Visibility::Public,
                 signature: Some("pub struct Helper {}".to_string()),
+                end_line: None,
             },
         ];
 
@@ -2950,6 +2957,7 @@ mod tests {
             line_number: 1,
             visibility: Visibility::Public,
             signature: Some("pub struct SearchResult {}".to_string()),
+            end_line: None,
         }];
 
         let references = build_rust_symbol_references(&files, &texts, &symbols);
@@ -2976,6 +2984,7 @@ mod tests {
             line_number: 1,
             visibility: Visibility::Public,
             signature: Some("pub struct SearchResult {}".to_string()),
+            end_line: None,
         }];
 
         let references = build_rust_symbol_references(&files, &texts, &symbols);
@@ -3002,6 +3011,7 @@ mod tests {
                 line_number: 1,
                 visibility: Visibility::Public,
                 signature: Some("pub struct SearchCoverage {}".to_string()),
+                end_line: None,
             },
             IndexedSymbol {
                 name: "SearchCoverage".to_string(),
@@ -3010,6 +3020,7 @@ mod tests {
                 line_number: 2,
                 visibility: Visibility::Private,
                 signature: Some("impl SearchCoverage {".to_string()),
+                end_line: None,
             },
         ];
 
@@ -3110,6 +3121,7 @@ mod tests {
                 line_number: 1,
                 visibility: Visibility::Public,
                 signature: Some("pub fn main()".to_string()),
+                end_line: None,
             }],
             symbol_references: vec![],
             edges: vec![IndexedEdge {

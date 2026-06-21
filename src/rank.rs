@@ -8,10 +8,55 @@ use crate::text::{
     normalize_phrase, shorten_snippet, squash_identifier, tokenize_lexical, tokenize_terms,
 };
 use crate::types::{
-    Confidence, Evidence, FileCandidate, IndexedSymbol, LineRange, SearchMatch, Snippet,
+    Confidence, DetailLevel, Evidence, FileCandidate, IndexedSymbol, LineRange, SearchMatch,
+    Snippet,
 };
 
 pub const CANDIDATE_LIMIT: usize = 8;
+/// Hard cap on the number of candidates returned regardless of score.
+pub const CANDIDATE_ENUM_LIMIT: usize = 50;
+
+/// Per-signal-family score budget.  Each bucket is capped independently before
+/// summing, so no single family can push the total above 1.0.  Budgets:
+///   filename_shape 0.40 — filename/path token match boost (separate so it can
+///                          outweigh phrase+symbol when the file is *named* after the query)
+///   lexical        0.20 — token matches, BM25, snippets, rg hit, term coverage
+///   phrase         0.18 — exact/near phrase (can go negative for fixture penalty)
+///   sym_def        0.25 — indexed_symbol_definition
+///   reference      0.08 — indexed_symbol_reference + indexed_edge
+///   role           0.08 — source/doc/test/config bonus; lockfile/generated penalty
+/// Max sum: 0.40+0.20+0.18+0.25+0.08+0.08 = 1.19 → clamped to 1.0
+struct ScoreBudget {
+    filename_shape: f64,
+    lexical: f64,
+    phrase: f64,
+    symbol_def: f64,
+    reference: f64,
+    role: f64,
+}
+
+impl ScoreBudget {
+    fn new() -> Self {
+        Self {
+            filename_shape: 0.0,
+            lexical: 0.0,
+            phrase: 0.0,
+            symbol_def: 0.0,
+            reference: 0.0,
+            role: 0.0,
+        }
+    }
+
+    fn total(&self) -> f64 {
+        let shape = self.filename_shape.clamp(0.0, 0.40);
+        let lex = self.lexical.clamp(0.0, 0.20);
+        let ph = self.phrase.clamp(-0.30, 0.18);
+        let sym = self.symbol_def.clamp(0.0, 0.25);
+        let rf = self.reference.clamp(0.0, 0.08);
+        let role = self.role.clamp(-0.15, 0.08);
+        (shape + lex + ph + sym + rf + role).clamp(0.0, 1.0)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FindRoleFilter {
@@ -207,11 +252,47 @@ pub fn rank_with_index(
             .then_with(|| left.0.path.cmp(&right.0.path))
     });
 
+    // Assign detail level based on score but do NOT strip data here.
+    // Call `apply_tiered_density` on the result in main.rs before serialization.
+    // Cap at CANDIDATE_ENUM_LIMIT regardless of score.
     finalized
         .into_iter()
-        .map(|(c, _)| c)
-        .take(CANDIDATE_LIMIT)
+        .take(CANDIDATE_ENUM_LIMIT)
+        .map(|(mut c, _)| {
+            c.detail_level = if c.score >= 0.70 {
+                DetailLevel::Full
+            } else if c.score >= 0.45 {
+                DetailLevel::Medium
+            } else if c.score >= 0.25 {
+                DetailLevel::Minimal
+            } else {
+                DetailLevel::Enum
+            };
+            c
+        })
         .collect()
+}
+
+/// Strip evidence/snippets from lower-detail candidates before JSON serialization.
+/// Call this on the ranked list before building the final report.
+pub fn apply_tiered_density(candidates: &mut Vec<FileCandidate>) {
+    for c in candidates.iter_mut() {
+        match c.detail_level {
+            DetailLevel::Full => {}
+            DetailLevel::Medium => {
+                c.evidence.truncate(2);
+            }
+            DetailLevel::Minimal => {
+                c.snippets.clear();
+                c.evidence.truncate(1);
+            }
+            DetailLevel::Enum => {
+                c.snippets.clear();
+                c.evidence.clear();
+                c.line_ranges.clear();
+            }
+        }
+    }
 }
 
 pub fn next_actions(_query: &str, candidates: &[FileCandidate], repo_root: &str) -> Vec<String> {
@@ -297,12 +378,12 @@ fn build_candidate(
     };
 
     let mut evidence = Vec::new();
-    let mut score = 0.0;
+    let mut budget = ScoreBudget::new();
     let mut matched_terms = BTreeSet::new();
     let mut path_shape_tier = 0usize;
 
     for token_match in collect_token_matches(profile, &path_tokens, &file_name_tokens, &matches) {
-        score += token_match.score;
+        budget.lexical += token_match.score;
         if let Some(evidence_item) = token_match.evidence {
             evidence.push(evidence_item);
         }
@@ -312,7 +393,7 @@ fn build_candidate(
     if let Some((boost, tier, evidence_item)) =
         filename_shape_boost(profile, &path_tokens, &file_name_tokens)
     {
-        score += boost;
+        budget.filename_shape += boost;
         evidence.push(evidence_item);
         path_shape_tier = path_shape_tier.max(tier);
     }
@@ -325,7 +406,7 @@ fn build_candidate(
         // keywords. cluster.is_fixture_like() checks the matched lines themselves.
         let fixture_like = cluster.is_fixture_like();
         let phrase_boost = exact_phrase_boost(&role, profile, fixture_like);
-        score += phrase_boost;
+        budget.phrase += phrase_boost;
         evidence.push(Evidence {
             evidence_type: "exact_phrase_match".to_string(),
             detail: format!(
@@ -334,14 +415,14 @@ fn build_candidate(
             ),
         });
         if fixture_like {
-            score -= 0.45;
+            budget.phrase -= 0.45;
             evidence.push(Evidence {
                 evidence_type: "fixture_like_match".to_string(),
                 detail: "exact phrase appears in assertion or fixture-like text".to_string(),
             });
         }
     } else if let Some(cluster) = best_near_cluster {
-        score += near_phrase_boost(&role, profile);
+        budget.phrase += near_phrase_boost(&role, profile);
         evidence.push(Evidence {
             evidence_type: "near_phrase_match".to_string(),
             detail: format!(
@@ -374,39 +455,40 @@ fn build_candidate(
         }
     }
 
-    apply_role_weight(&role, &mut score, &mut evidence);
+    budget.role += apply_role_weight(&role, &mut evidence);
 
     let mut index_tier = path_shape_tier;
     if let Some(index) = index {
-        index_tier = index_tier.max(apply_index_evidence(
+        let (sym_def_score, ref_score, ev_tier) = apply_index_evidence(
             &normalized_path,
             &role,
             profile,
             index,
             index_status,
-            &mut score,
             &mut evidence,
-        ));
-        apply_lex_score(
+        );
+        budget.symbol_def += sym_def_score;
+        budget.reference += ref_score;
+        index_tier = index_tier.max(ev_tier);
+        budget.lexical += apply_lex_score(
             &normalized_path,
             &profile.lex_tokens,
             lex_df,
             index,
             index_status,
-            &mut score,
             &mut evidence,
         );
     }
 
     let snippets = build_snippets(&clusters, profile);
     if !snippets.is_empty() {
-        score += 0.01 * snippets.len().min(3) as f64;
+        budget.lexical += 0.01 * snippets.len().min(3) as f64;
     }
 
     if !matches.is_empty() {
         let line_ranges = compress_line_ranges(&matches);
         let lines = format_line_ranges(&line_ranges);
-        score += 0.03 + (clusters.len().min(4) as f64 * 0.01);
+        budget.lexical += 0.03 + (clusters.len().min(4) as f64 * 0.01);
         evidence.push(Evidence {
             evidence_type: "rg_match".to_string(),
             detail: format!("matched on lines {lines}"),
@@ -416,9 +498,9 @@ fn build_candidate(
     if !profile.terms.is_empty() && !matched_terms.is_empty() {
         let matched_term_count = matched_terms.len() as f64;
         let missing_terms = profile.terms.len().saturating_sub(matched_terms.len()) as f64;
-        score += matched_term_count * 0.14;
+        budget.lexical += matched_term_count * 0.07;
         if missing_terms > 0.0 {
-            score -= missing_terms * 0.07;
+            budget.lexical -= missing_terms * 0.04;
         }
         evidence.push(Evidence {
             evidence_type: "query_term_coverage".to_string(),
@@ -430,15 +512,20 @@ fn build_candidate(
         });
     }
 
+    // Fixture-like cap: force phrase budget to go deeply negative so total stays low
     if evidence
         .iter()
         .any(|item| item.evidence_type == "fixture_like_match")
     {
-        score = score.min(0.30);
+        budget.phrase = budget.phrase.min(-0.20);
     }
 
-    let raw_score = score;
-    let score = round_score(score.clamp(0.0, 1.0));
+    // Deduplicate evidence by (type, detail) before final assembly
+    let mut seen_evidence = std::collections::BTreeSet::new();
+    evidence.retain(|e| seen_evidence.insert((e.evidence_type.clone(), e.detail.clone())));
+
+    let raw_score = budget.total();
+    let score = round_score(raw_score);
     let confidence = confidence_for(
         &role,
         profile,
@@ -455,6 +542,7 @@ fn build_candidate(
             role: role.to_string(),
             score,
             confidence,
+            detail_level: DetailLevel::Full,
             line_ranges: compress_line_ranges(&matches),
             snippets,
             evidence,
@@ -711,69 +799,71 @@ fn near_phrase_boost(role: &FileRole, profile: &QueryProfile) -> f64 {
     boost
 }
 
-fn apply_role_weight(role: &FileRole, score: &mut f64, evidence: &mut Vec<Evidence>) {
+fn apply_role_weight(role: &FileRole, evidence: &mut Vec<Evidence>) -> f64 {
     match role {
         FileRole::Source => {
-            *score += 0.06;
             evidence.push(Evidence {
                 evidence_type: "source_role".to_string(),
                 detail: "path suggests source-like file role".to_string(),
             });
+            0.06
         }
         FileRole::Test => {
-            *score += 0.03;
             evidence.push(Evidence {
                 evidence_type: "test_role".to_string(),
                 detail: "path suggests test file role".to_string(),
             });
+            0.03
         }
         FileRole::Doc => {
-            *score += 0.02;
             evidence.push(Evidence {
                 evidence_type: "doc_role".to_string(),
                 detail: "path suggests documentation file role".to_string(),
             });
+            0.02
         }
         FileRole::Config => {
-            *score += 0.04;
             evidence.push(Evidence {
                 evidence_type: "config_role".to_string(),
                 detail: "path suggests configuration file role".to_string(),
             });
+            0.04
         }
         FileRole::Lockfile => {
-            *score -= 0.10;
             evidence.push(Evidence {
                 evidence_type: "lockfile_role".to_string(),
                 detail: "path suggests lockfile or dependency snapshot".to_string(),
             });
+            -0.10
         }
         FileRole::Generated => {
-            *score -= 0.05;
             evidence.push(Evidence {
                 evidence_type: "generated_role".to_string(),
                 detail: "path suggests generated or build output".to_string(),
             });
+            -0.05
         }
-        FileRole::Other => {}
+        FileRole::Other => 0.0,
     }
 }
 
+/// Returns (symbol_def_score, reference_score, tier) for budget routing.
+/// Evidence items are inserted into the caller's evidence vec in priority order.
 fn apply_index_evidence(
     path: &str,
     role: &FileRole,
     profile: &QueryProfile,
     index: &index::RepoIndex,
     index_status: &str,
-    score: &mut f64,
     evidence: &mut Vec<Evidence>,
-) -> usize {
+) -> (f64, f64, usize) {
     let scale = index_boost_scale(index_status);
     if scale <= 0.0 {
-        return 0;
+        return (0.0, 0.0, 0);
     }
 
-    let mut boosts = Vec::new();
+    let mut def_boosts: Vec<IndexSignal> = Vec::new();
+    let mut ref_boosts: Vec<IndexSignal> = Vec::new();
     let mut seen = BTreeSet::new();
 
     for symbol in index
@@ -784,7 +874,7 @@ fn apply_index_evidence(
         if let Some(signal) = symbol_definition_signal(symbol, profile, role, scale) {
             let key = format!("definition:{}:{}", symbol.name, symbol.line_number);
             if seen.insert(key) {
-                boosts.push(signal);
+                def_boosts.push(signal);
             }
         }
     }
@@ -798,7 +888,7 @@ fn apply_index_evidence(
                 reference.symbol_name, reference.line_number, reference.reason
             );
             if seen.insert(key) {
-                boosts.push(signal);
+                ref_boosts.push(signal);
             }
         }
     }
@@ -811,40 +901,49 @@ fn apply_index_evidence(
         if let Some(signal) = edge_signal(edge, path, scale, profile, index) {
             let key = format!("edge:{}:{}:{}", edge.edge_type, edge.from, edge.to);
             if seen.insert(key) {
-                boosts.push(signal);
+                ref_boosts.push(signal);
             }
         }
     }
 
-    boosts.sort_by(|left, right| {
-        right
-            .tier
-            .cmp(&left.tier)
-            .then_with(|| {
-                right
-                    .score
-                    .partial_cmp(&left.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .then_with(|| {
-                index_confidence_priority(left.confidence)
-                    .cmp(&index_confidence_priority(right.confidence))
-            })
-            .then_with(|| {
-                left.evidence
-                    .evidence_type
-                    .cmp(&right.evidence.evidence_type)
-            })
-    });
-    let index_tier = boosts.iter().map(|signal| signal.tier).max().unwrap_or(0);
-    boosts.truncate(3);
+    // Sort each group by tier desc then score desc; keep top 2 each for evidence
+    let sort_signals = |boosts: &mut Vec<IndexSignal>| {
+        boosts.sort_by(|l, r| {
+            r.tier
+                .cmp(&l.tier)
+                .then_with(|| {
+                    r.score
+                        .partial_cmp(&l.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| {
+                    index_confidence_priority(l.confidence)
+                        .cmp(&index_confidence_priority(r.confidence))
+                })
+        });
+    };
+    sort_signals(&mut def_boosts);
+    sort_signals(&mut ref_boosts);
 
-    for signal in boosts.into_iter().rev() {
-        *score += signal.score;
+    let index_tier = def_boosts
+        .iter()
+        .chain(ref_boosts.iter())
+        .map(|s| s.tier)
+        .max()
+        .unwrap_or(0);
+
+    let def_score: f64 = def_boosts.iter().take(2).map(|s| s.score).sum();
+    let ref_score: f64 = ref_boosts.iter().take(2).map(|s| s.score).sum();
+
+    // Insert evidence (highest priority first, at front of list)
+    for signal in def_boosts.into_iter().take(2).rev() {
+        evidence.insert(0, signal.evidence);
+    }
+    for signal in ref_boosts.into_iter().take(2).rev() {
         evidence.insert(0, signal.evidence);
     }
 
-    index_tier
+    (def_score, ref_score, index_tier)
 }
 
 fn apply_lex_score(
@@ -853,28 +952,27 @@ fn apply_lex_score(
     lex_df: &HashMap<String, usize>,
     index: &index::RepoIndex,
     index_status: &str,
-    score: &mut f64,
     evidence: &mut Vec<Evidence>,
-) {
+) -> f64 {
     let scale = index_boost_scale(index_status);
     if scale <= 0.0 || lex_tokens.is_empty() {
-        return;
+        return 0.0;
     }
 
     let avg_doc_len = index.stats.avg_doc_length;
     let n = index.stats.lex_file_count;
     if avg_doc_len <= 0.0 || n == 0 {
-        return;
+        return 0.0;
     }
 
     let Some(file) = index.files.iter().find(|f| f.path == path) else {
-        return;
+        return 0.0;
     };
     let Some(lex_stats) = file.lex_stats.as_ref() else {
-        return;
+        return 0.0;
     };
     if lex_stats.doc_length == 0 {
-        return;
+        return 0.0;
     }
 
     let k1 = 1.5_f64;
@@ -900,21 +998,18 @@ fn apply_lex_score(
     }
 
     if raw_score <= 0.0 || matched.is_empty() {
-        return;
+        return 0.0;
     }
 
-    // Normalize to [0..1]: max per term is (k1+1) * ln(n+1), scaled to 0.20 max contribution.
-    // This keeps lex evidence below exact-phrase (0.34) and symbol-definition (0.78) signals.
+    // Normalize to [0..1]: max per term is (k1+1) * ln(n+1), scaled to 0.15 max contribution.
     let max_per_term = (k1 + 1.0) * (n_f + 1.0).ln().max(1.0);
     let max_possible = lex_tokens.len() as f64 * max_per_term;
     let normalized = (raw_score / max_possible.max(1.0)).min(1.0);
-    let contribution = (normalized * 0.20 * scale).max(0.0);
+    let contribution = (normalized * 0.15 * scale).max(0.0);
 
     if contribution < 0.01 {
-        return;
+        return 0.0;
     }
-
-    *score += contribution;
 
     if contribution >= 0.04 {
         // Insert right after the last indexed signal so this evidence is visible
@@ -936,6 +1031,8 @@ fn apply_lex_score(
             },
         );
     }
+
+    contribution
 }
 
 fn index_boost_scale(index_status: &str) -> f64 {
@@ -1274,38 +1371,10 @@ struct RankedCandidate {
     raw_score: f64,
 }
 
-fn finalize_ranked_candidate(mut ranked: RankedCandidate) -> (FileCandidate, f64) {
-    let tier = ranked.tier;
-    let has_index_definition = ranked
-        .candidate
-        .evidence
-        .iter()
-        .any(|item| item.evidence_type == "indexed_symbol_definition");
-    let has_index_reference = ranked
-        .candidate
-        .evidence
-        .iter()
-        .any(|item| item.evidence_type == "indexed_symbol_reference");
-    let has_index_edge = ranked
-        .candidate
-        .evidence
-        .iter()
-        .any(|item| item.evidence_type == "indexed_edge");
-
-    if tier > 0 {
-        let tier_score = tier as f64 * 0.15;
-        ranked.candidate.score = round_score((ranked.candidate.score + tier_score).max(0.0));
-        ranked.candidate.confidence = if has_index_definition {
-            Confidence::High
-        } else if tier >= 2 || has_index_reference {
-            Confidence::Medium
-        } else if has_index_edge {
-            Confidence::Low
-        } else {
-            ranked.candidate.confidence
-        };
-    }
-
+fn finalize_ranked_candidate(ranked: RankedCandidate) -> (FileCandidate, f64) {
+    // Score is already budget-capped in [0.0, 1.0] from build_candidate.
+    // Tier is used only for sort-order tiebreaking (see sort comparator in rank_with_index).
+    // Confidence is set by confidence_for() based on evidence quality; no override here.
     (ranked.candidate, ranked.raw_score)
 }
 
@@ -1843,6 +1912,7 @@ mod tests {
             line_number,
             visibility: crate::types::Visibility::Public,
             signature: Some(format!("pub struct {name} {{")),
+            end_line: None,
         }
     }
 
@@ -2706,6 +2776,7 @@ mod tests {
                 line_number: 11,
                 visibility: crate::types::Visibility::Public,
                 signature: Some("pub struct DownloadProgress {".to_string()),
+                end_line: None,
             }],
             symbol_references: vec![],
             edges: vec![],

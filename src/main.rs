@@ -4,6 +4,7 @@ mod index;
 mod map;
 mod output;
 mod parser;
+mod peek;
 mod rank;
 mod related;
 mod repo;
@@ -74,6 +75,9 @@ fn run() -> Result<()> {
                 (det_candidates, "not_requested".to_string())
             };
 
+            let mut candidates = candidates;
+            rank::apply_tiered_density(&mut candidates);
+
             let next_actions =
                 rank::next_actions(&query, &candidates, &repo::display_path(&repo.root));
             let mut coverage = search
@@ -135,6 +139,28 @@ fn run() -> Result<()> {
             let repo = repo::discover()?;
             let report = blast::build_report(&repo, &query)?;
             blast::write_report(&report, json)?;
+        }
+        cli::Commands::Peek { symbol, file, json } => {
+            let repo = repo::discover()?;
+            let loaded = index::load(&repo)?;
+            let Some(index) = loaded.index.as_ref() else {
+                anyhow::bail!(
+                    "no index found — run `agentgrep index` first to enable peek"
+                );
+            };
+            let report = peek::peek_symbol(&symbol, file.as_deref(), index, &repo::display_path(&repo.root))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("{}  {}:{}-{}", report.kind, report.file_path, report.line_number, report.end_line);
+                if let Some(sig) = &report.signature {
+                    println!("{sig}");
+                }
+                println!();
+                for line in &report.body {
+                    println!("{:4}  {}", line.line, line.text);
+                }
+            }
         }
         cli::Commands::Semantic { action } => {
             let repo = repo::discover()?;

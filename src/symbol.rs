@@ -623,6 +623,7 @@ mod tests {
             line_number,
             visibility: crate::types::Visibility::Public,
             signature: Some(format!("pub fn {name}()")),
+            end_line: None,
         }
     }
 
@@ -817,6 +818,7 @@ mod tests {
             line_number: 11,
             visibility: crate::types::Visibility::Public,
             signature: Some("pub struct SearchResult {".to_string()),
+            end_line: None,
         };
 
         let references = collect_used_by(&index, &symbol);
@@ -854,6 +856,7 @@ mod tests {
                 line_number: 4,
                 visibility: crate::types::Visibility::Public,
                 signature: Some("class LLMClient:".to_string()),
+                end_line: None,
             }],
             symbol_references: vec![crate::index::IndexedSymbolReference {
                 from_file: "app/meeting_session.py".to_string(),
@@ -884,6 +887,7 @@ mod tests {
             line_number: 4,
             visibility: crate::types::Visibility::Public,
             signature: Some("class LLMClient:".to_string()),
+            end_line: None,
         };
 
         let references = collect_used_by(&index, &symbol);

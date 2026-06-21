@@ -5,7 +5,7 @@ use tree_sitter::Node;
 use crate::index::EdgeConfidence;
 use crate::types::{SymbolKind, Visibility};
 
-use super::extracted::{edge, file_facts, symbol, FileFacts, ImportBinding};
+use super::extracted::{call_site, edge, file_facts, symbol, FileFacts, ImportBinding};
 use super::language::{join_relative, normalize_path, parent_dir, parse_source, RepoLookup};
 use super::symbol_signature;
 
@@ -115,36 +115,42 @@ fn walk_js_node(
                         ));
                     }
                 }
+            } else {
+                extract_js_call_site(node, file_path, source, facts);
             }
         }
         "function_declaration" | "generator_function_declaration" => {
             if let Some(name) = node
                 .child_by_field_name("name")
-                .and_then(|node| node.utf8_text(source.as_bytes()).ok())
+                .and_then(|n| n.utf8_text(source.as_bytes()).ok())
             {
-                facts.symbols.push(symbol(
+                let mut sym = symbol(
                     name.to_string(),
                     SymbolKind::Function,
                     file_path,
                     node.start_position().row + 1,
                     js_visibility(name, exported),
                     symbol_signature(source, node.start_position().row + 1, 120),
-                ));
+                );
+                sym.end_line = Some(node.end_position().row + 1);
+                facts.symbols.push(sym);
             }
         }
         "class_declaration" => {
             if let Some(name) = node
                 .child_by_field_name("name")
-                .and_then(|node| node.utf8_text(source.as_bytes()).ok())
+                .and_then(|n| n.utf8_text(source.as_bytes()).ok())
             {
-                facts.symbols.push(symbol(
+                let mut sym = symbol(
                     name.to_string(),
                     SymbolKind::Struct,
                     file_path,
                     node.start_position().row + 1,
                     js_visibility(name, exported),
                     symbol_signature(source, node.start_position().row + 1, 120),
-                ));
+                );
+                sym.end_line = Some(node.end_position().row + 1);
+                facts.symbols.push(sym);
             }
         }
         "lexical_declaration" | "variable_declaration" => {
@@ -152,6 +158,17 @@ fn walk_js_node(
                 if child.kind() == "variable_declarator" {
                     extract_js_variable_symbol(child, file_path, source, exported, facts);
                 }
+            }
+        }
+        "expression_statement" => {
+            if let Some(inner) = node.named_child(0) {
+                if inner.kind() == "assignment_expression" {
+                    extract_js_assignment_symbol(inner, file_path, source, exported, facts);
+                }
+            }
+            // Still walk in case children have exports or nested declarations
+            for child in named_children(node) {
+                walk_js_node(child, file_path, source, lookup, exported, facts);
             }
         }
         _ => {
@@ -185,14 +202,105 @@ fn extract_js_variable_symbol(
         _ => return,
     };
 
-    facts.symbols.push(symbol(
+    let mut sym = symbol(
         name.to_string(),
         kind,
         file_path,
         node.start_position().row + 1,
         js_visibility(name, exported),
         symbol_signature(source, node.start_position().row + 1, 120),
-    ));
+    );
+    sym.end_line = Some(node.end_position().row + 1);
+    facts.symbols.push(sym);
+}
+
+/// Extracts a symbol from `proto.use = function use(fn) {}` style assignments.
+/// The right-hand side must be a function_expression or arrow_function.
+/// The symbol name is taken from: (1) the function's own `id` field if present,
+/// else (2) the last property segment of the left-hand side (`app.use` → `use`).
+fn extract_js_assignment_symbol(
+    node: Node,
+    file_path: &str,
+    source: &str,
+    exported: bool,
+    facts: &mut FileFacts,
+) {
+    let Some(rhs) = node.child_by_field_name("right") else {
+        return;
+    };
+    if !matches!(rhs.kind(), "function_expression" | "arrow_function") {
+        return;
+    }
+
+    // Try to get the function's own name first (e.g. `function use(fn) {}`).
+    let fn_name = rhs
+        .child_by_field_name("name")
+        .and_then(|n| n.utf8_text(source.as_bytes()).ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    // Fall back to the last segment of the LHS (e.g. `app.use` or `proto.use`).
+    let lhs_name = node
+        .child_by_field_name("left")
+        .and_then(|lhs| {
+            if lhs.kind() == "member_expression" {
+                lhs.child_by_field_name("property")
+            } else {
+                None
+            }
+        })
+        .and_then(|n| n.utf8_text(source.as_bytes()).ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let name = fn_name.or(lhs_name);
+    let Some(name) = name else {
+        return;
+    };
+
+    let mut sym = symbol(
+        name.to_string(),
+        SymbolKind::Function,
+        file_path,
+        node.start_position().row + 1,
+        js_visibility(name, exported),
+        symbol_signature(source, node.start_position().row + 1, 120),
+    );
+    sym.end_line = Some(node.end_position().row + 1);
+    facts.symbols.push(sym);
+}
+
+const JS_BUILTIN_BLOCKLIST: &[&str] = &[
+    "console", "log", "error", "warn", "info", "debug", "toString", "valueOf", "hasOwnProperty",
+    "call", "apply", "bind", "then", "catch", "finally", "resolve", "reject", "push", "pop",
+    "shift", "unshift", "slice", "splice", "map", "filter", "reduce", "find", "findIndex",
+    "forEach", "includes", "indexOf", "some", "every", "join", "split", "replace", "trim",
+    "startsWith", "endsWith", "substring", "slice", "parseInt", "parseFloat", "isNaN",
+    "setTimeout", "setInterval", "clearTimeout", "clearInterval", "fetch", "require", "use",
+    "get", "set", "delete", "has", "add", "clear", "keys", "values", "entries", "next",
+    "assign", "keys", "values", "entries", "create", "defineProperty", "freeze",
+];
+
+fn extract_js_call_site(node: Node, file_path: &str, source: &str, facts: &mut FileFacts) {
+    let Some(func_node) = node.child_by_field_name("function") else {
+        return;
+    };
+    let name = match func_node.kind() {
+        "identifier" => func_node.utf8_text(source.as_bytes()).ok().map(str::to_string),
+        "member_expression" => func_node
+            .child_by_field_name("property")
+            .and_then(|n| n.utf8_text(source.as_bytes()).ok())
+            .map(str::to_string),
+        _ => None,
+    };
+    let Some(name) = name else { return };
+    if name.len() < 3 || JS_BUILTIN_BLOCKLIST.contains(&name.as_str()) {
+        return;
+    }
+    let line = node.start_position().row + 1;
+    facts
+        .symbol_references
+        .push(call_site(&name, file_path, line));
 }
 
 fn resolve_js_import(
@@ -380,6 +488,27 @@ export class Runner {}
             .iter()
             .any(|binding| binding.symbol_name == "LLMClient"));
         assert!(facts.edges.iter().any(|edge| edge.to == "shared.js"));
+    }
+
+    #[test]
+    fn extracts_prototype_assignment() {
+        let source = r#"
+app.use = function use(fn) {
+    this.stack.push(fn);
+};
+
+proto.handle = function handle(req, res, out) {
+    return this.router.handle(req, res, out);
+};
+
+const arrow = (x) => x;
+"#;
+        let facts =
+            extract_file_facts("lib/application.js", source, &lookup(&["lib/application.js"]));
+        let names: Vec<_> = facts.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"use"), "named fn expression: app.use = function use");
+        assert!(names.contains(&"handle"), "lhs fallback: proto.handle");
+        assert!(names.contains(&"arrow"), "plain const arrow unaffected");
     }
 
     #[test]

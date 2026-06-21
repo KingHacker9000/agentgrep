@@ -1320,6 +1320,7 @@ mod tests {
             line_number,
             visibility: crate::types::Visibility::Public,
             signature: Some(signature),
+            end_line: None,
         }
     }
 

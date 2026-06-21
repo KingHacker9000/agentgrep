@@ -19,9 +19,25 @@ pub struct FileCandidate {
     pub role: String,
     pub score: f64,
     pub confidence: Confidence,
+    pub detail_level: DetailLevel,
     pub line_ranges: Vec<LineRange>,
     pub snippets: Vec<Snippet>,
     pub evidence: Vec<Evidence>,
+}
+
+/// Controls how much per-candidate data is included in the output.
+/// Assigned in `rank_with_index` based on score thresholds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DetailLevel {
+    /// score >= 0.70 — all fields present
+    Full,
+    /// 0.45 <= score < 0.70 — snippets present, evidence trimmed to 2
+    Medium,
+    /// 0.25 <= score < 0.45 — snippets dropped, 1 evidence entry
+    Minimal,
+    /// score < 0.25 — path/role/score/confidence only
+    Enum,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -306,9 +322,10 @@ impl std::fmt::Display for SymbolMatchMode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum SymbolKind {
+    #[default]
     Function,
     Struct,
     Enum,
@@ -339,9 +356,10 @@ impl std::fmt::Display for SymbolKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum Visibility {
+    #[default]
     Public,
     Private,
 }
@@ -356,7 +374,7 @@ impl std::fmt::Display for Visibility {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IndexedSymbol {
     pub name: String,
     pub kind: SymbolKind,
@@ -364,6 +382,9 @@ pub struct IndexedSymbol {
     pub line_number: usize,
     pub visibility: Visibility,
     pub signature: Option<String>,
+    /// Last line of the symbol's body (from tree-sitter extent). None for old indexes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -387,6 +408,7 @@ mod tests {
             line_number: 12,
             visibility: Visibility::Public,
             signature: Some(format!("pub fn {name}()")),
+            end_line: None,
         }
     }
 
@@ -467,6 +489,7 @@ mod tests {
                 role: "source".to_string(),
                 score: 0.9,
                 confidence: Confidence::High,
+                detail_level: DetailLevel::Full,
                 line_ranges: vec![LineRange { start: 12, end: 12 }],
                 snippets: vec![Snippet {
                     line_number: 12,

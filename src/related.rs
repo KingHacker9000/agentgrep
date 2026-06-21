@@ -1113,6 +1113,7 @@ mod tests {
                         line_number: 11,
                         visibility: crate::types::Visibility::Public,
                         signature: Some("pub struct SearchResult {".to_string()),
+                        end_line: None,
                     },
                     crate::types::IndexedSymbol {
                         name: "FindReport".to_string(),
@@ -1121,6 +1122,7 @@ mod tests {
                         line_number: 5,
                         visibility: crate::types::Visibility::Public,
                         signature: Some("pub struct FindReport {".to_string()),
+                        end_line: None,
                     },
                     crate::types::IndexedSymbol {
                         name: "SearchCoverage".to_string(),
@@ -1129,6 +1131,7 @@ mod tests {
                         line_number: 66,
                         visibility: crate::types::Visibility::Public,
                         signature: Some("pub struct SearchCoverage {".to_string()),
+                        end_line: None,
                     },
                     crate::types::IndexedSymbol {
                         name: "SearchCoverage".to_string(),
@@ -1137,6 +1140,7 @@ mod tests {
                         line_number: 77,
                         visibility: crate::types::Visibility::Private,
                         signature: Some("impl SearchCoverage {".to_string()),
+                        end_line: None,
                     },
                 ],
                 symbol_references: vec![

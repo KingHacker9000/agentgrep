@@ -55,6 +55,27 @@ pub fn symbol(
         line_number,
         visibility,
         signature,
+        end_line: None,
+    }
+}
+
+pub fn symbol_with_extent(
+    name: String,
+    kind: SymbolKind,
+    file_path: &str,
+    line_number: usize,
+    end_line: usize,
+    visibility: Visibility,
+    signature: Option<String>,
+) -> IndexedSymbol {
+    IndexedSymbol {
+        name,
+        kind,
+        file_path: file_path.to_string(),
+        line_number,
+        visibility,
+        signature,
+        end_line: Some(end_line),
     }
 }
 
@@ -97,6 +118,17 @@ impl ImportBinding {
             context: ReferenceContext::Production,
             additional_count: 0,
         }
+    }
+}
+
+pub fn call_site(symbol_name: &str, from_file: &str, line_number: usize) -> ImportBinding {
+    ImportBinding {
+        from_file: from_file.to_string(),
+        symbol_name: symbol_name.to_string(),
+        target_file: None,
+        line_number,
+        confidence: EdgeConfidence::Inferred,
+        reason: "call site".to_string(),
     }
 }
 

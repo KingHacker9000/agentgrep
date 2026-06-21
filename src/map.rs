@@ -300,6 +300,7 @@ fn render_symbols(symbols: &[&IndexedSymbol]) -> Vec<IndexedSymbol> {
                 .signature
                 .as_ref()
                 .map(|signature| shorten_snippet(signature, 120)),
+            end_line: symbol.end_line,
         })
         .collect()
 }
@@ -535,6 +536,7 @@ mod tests {
                     line_number: 12,
                     visibility: crate::types::Visibility::Public,
                     signature: Some("pub fn run()".to_string()),
+                    end_line: None,
                 }],
                 symbol_references: vec![],
                 edges: vec![],

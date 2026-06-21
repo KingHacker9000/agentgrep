@@ -112,6 +112,17 @@ pub enum Commands {
         #[arg(long, help = "Write stable JSON instead of text.")]
         json: bool,
     },
+    /// Show the body of an indexed symbol (requires index).
+    Peek {
+        /// Symbol name to peek at.
+        symbol: String,
+        /// File path to disambiguate when the symbol appears in multiple files.
+        #[arg(long, value_name = "FILE")]
+        file: Option<String>,
+        /// Write stable JSON instead of text.
+        #[arg(long, help = "Write stable JSON instead of text.")]
+        json: bool,
+    },
     /// Inspect or clean the semantic index and model cache.
     Semantic {
         #[command(subcommand)]

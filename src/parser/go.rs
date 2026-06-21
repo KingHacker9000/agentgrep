@@ -49,37 +49,41 @@ fn walk_go_node(
         "function_declaration" => {
             if let Some(name) = node
                 .child_by_field_name("name")
-                .and_then(|node| node.utf8_text(source.as_bytes()).ok())
+                .and_then(|n| n.utf8_text(source.as_bytes()).ok())
             {
-                facts.symbols.push(symbol(
+                let mut sym = symbol(
                     name.to_string(),
                     SymbolKind::Function,
                     file_path,
                     node.start_position().row + 1,
                     Visibility::Public,
                     symbol_signature(source, node.start_position().row + 1, 120),
-                ));
+                );
+                sym.end_line = Some(node.end_position().row + 1);
+                facts.symbols.push(sym);
             }
         }
         "method_declaration" => {
             if let Some(name) = node
                 .child_by_field_name("name")
-                .and_then(|node| node.utf8_text(source.as_bytes()).ok())
+                .and_then(|n| n.utf8_text(source.as_bytes()).ok())
             {
-                facts.symbols.push(symbol(
+                let mut sym = symbol(
                     name.to_string(),
                     SymbolKind::Function,
                     file_path,
                     node.start_position().row + 1,
                     Visibility::Public,
                     symbol_signature(source, node.start_position().row + 1, 120),
-                ));
+                );
+                sym.end_line = Some(node.end_position().row + 1);
+                facts.symbols.push(sym);
             }
         }
         "type_spec" => {
             let Some(name) = node
                 .child_by_field_name("name")
-                .and_then(|node| node.utf8_text(source.as_bytes()).ok())
+                .and_then(|n| n.utf8_text(source.as_bytes()).ok())
             else {
                 for child in named_children(node) {
                     walk_go_node(child, file_path, source, lookup, facts);
@@ -89,7 +93,7 @@ fn walk_go_node(
 
             let kind = match node
                 .child_by_field_name("type")
-                .map(|node| node.kind())
+                .map(|n| n.kind())
                 .unwrap_or_default()
             {
                 "struct_type" => SymbolKind::Struct,
@@ -97,37 +101,35 @@ fn walk_go_node(
                 _ => SymbolKind::TypeAlias,
             };
 
-            facts.symbols.push(symbol(
+            let mut sym = symbol(
                 name.to_string(),
                 kind,
                 file_path,
                 node.start_position().row + 1,
                 Visibility::Public,
                 symbol_signature(source, node.start_position().row + 1, 120),
-            ));
+            );
+            sym.end_line = Some(node.end_position().row + 1);
+            facts.symbols.push(sym);
         }
-        "const_spec" => {
+        "const_spec" | "var_spec" => {
+            // Constants and vars are single-line; end_line == line_number
+            let kind = if node.kind() == "const_spec" {
+                SymbolKind::Const
+            } else {
+                SymbolKind::Static
+            };
             for name in go_spec_names(node, source) {
-                facts.symbols.push(symbol(
+                let mut sym = symbol(
                     name,
-                    SymbolKind::Const,
+                    kind.clone(),
                     file_path,
                     node.start_position().row + 1,
                     Visibility::Public,
                     symbol_signature(source, node.start_position().row + 1, 120),
-                ));
-            }
-        }
-        "var_spec" => {
-            for name in go_spec_names(node, source) {
-                facts.symbols.push(symbol(
-                    name,
-                    SymbolKind::Static,
-                    file_path,
-                    node.start_position().row + 1,
-                    Visibility::Public,
-                    symbol_signature(source, node.start_position().row + 1, 120),
-                ));
+                );
+                sym.end_line = Some(node.end_position().row + 1);
+                facts.symbols.push(sym);
             }
         }
         _ => {

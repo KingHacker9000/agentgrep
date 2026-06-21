@@ -741,6 +741,7 @@ pub fn expand_candidates(
                 role,
                 score,
                 confidence,
+                detail_level: crate::types::DetailLevel::Full,
                 line_ranges: vec![],
                 snippets: vec![],
                 evidence: vec![evidence],
@@ -1047,6 +1048,7 @@ mod tests {
             role: "source".to_string(),
             score: 0.75,
             confidence: Confidence::High,
+            detail_level: crate::types::DetailLevel::Full,
             line_ranges: vec![],
             snippets: vec![],
             evidence: vec![
@@ -1070,6 +1072,7 @@ mod tests {
             role: "doc".to_string(),
             score: 0.90,
             confidence: Confidence::Medium,
+            detail_level: crate::types::DetailLevel::Full,
             line_ranges: vec![],
             snippets: vec![],
             evidence: vec![
@@ -1108,6 +1111,7 @@ mod tests {
             role: "doc".to_string(),
             score: 0.90,
             confidence: Confidence::Medium,
+            detail_level: crate::types::DetailLevel::Full,
             line_ranges: vec![],
             snippets: vec![],
             evidence: vec![Evidence {
@@ -1121,6 +1125,7 @@ mod tests {
             role: "source".to_string(),
             score: 0.75,
             confidence: Confidence::Medium,
+            detail_level: crate::types::DetailLevel::Full,
             line_ranges: vec![],
             snippets: vec![],
             evidence: vec![
@@ -1160,6 +1165,7 @@ mod tests {
             role: "source".to_string(),
             score: 1.0,
             confidence: Confidence::High,
+            detail_level: crate::types::DetailLevel::Full,
             line_ranges: vec![],
             snippets: vec![],
             evidence: vec![
@@ -1179,6 +1185,7 @@ mod tests {
             role: "doc".to_string(),
             score: 1.0,
             confidence: Confidence::Medium,
+            detail_level: crate::types::DetailLevel::Full,
             line_ranges: vec![],
             snippets: vec![],
             evidence: vec![
